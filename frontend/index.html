@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="Agentic Digital Twin — Intelligent subscription management dashboard" />
+  <title>Agentic Digital Twin — Dashboard</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🤖</text></svg>" />
+</head>
+<body>
+
+  <div class="app-layout">
+    <!-- ═══ SIDEBAR ═══ -->
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-brand">
+        <div class="brand-icon">🤖</div>
+        <div class="brand-text">
+          <h2>Digital Twin</h2>
+          <span>Agentic AI v1.0</span>
+        </div>
+      </div>
+
+      <nav class="sidebar-nav">
+        <div class="nav-section-label">Overview</div>
+        <div class="nav-item active" data-page="dashboard">
+          <span class="nav-icon">📊</span> Dashboard
+        </div>
+
+        <div class="nav-section-label">Data Management</div>
+        <div class="nav-item" data-page="users">
+          <span class="nav-icon">👤</span> Users
+        </div>
+        <div class="nav-item" data-page="subscriptions">
+          <span class="nav-icon">📱</span> Subscriptions
+        </div>
+        <div class="nav-item" data-page="usage">
+          <span class="nav-icon">📈</span> Usage Data
+        </div>
+
+        <div class="nav-section-label">Intelligent Modules</div>
+        <div class="nav-item" data-page="analysis">
+          <span class="nav-icon">🔍</span> Analysis
+        </div>
+        <div class="nav-item" data-page="negotiation">
+          <span class="nav-icon">🤝</span> Negotiation
+        </div>
+        <div class="nav-item" data-page="switching">
+          <span class="nav-icon">🔄</span> Plan Switching
+        </div>
+        <div class="nav-item" data-page="audit">
+          <span class="nav-icon">📝</span> Audit Logs
+        </div>
+      </nav>
+
+      <div class="sidebar-footer">
+        <div class="server-status">
+          <span class="status-dot" id="serverDot"></span>
+          <span id="serverLabel">Server Online</span>
+        </div>
+      </div>
+    </aside>
+
+    <!-- ═══ MAIN ═══ -->
+    <main class="main-content">
+      <header class="content-header">
+        <button class="mobile-toggle" onclick="toggleSidebar()">☰</button>
+        <h1 id="pageTitle">Dashboard</h1>
+        <div class="header-actions">
+          <div class="user-selector">
+            <span>👤</span>
+            <select id="globalUserSelect" onchange="onUserChange()">
+              <option value="">Loading...</option>
+            </select>
+          </div>
+        </div>
+      </header>
+
+      <div class="content-body" id="contentBody">
+        <!-- Dynamic page content injected here -->
+      </div>
+    </main>
+  </div>
+
+  <!-- ═══ TOAST CONTAINER ═══ -->
+  <div class="toast-container" id="toastContainer"></div>
+
+  <script src="/static/script.js"></script>
+</body>
+</html>
