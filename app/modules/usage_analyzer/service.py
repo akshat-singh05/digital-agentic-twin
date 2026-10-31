@@ -23,19 +23,18 @@ from app.modules.usage_analyzer.analyzer import (
 logger = get_logger(__name__)
 
 
-def _get_usage_for_subscription(
-    db: Session, user_id: int, provider: str
+def get_usage_for_subscription(
+    db: Session, subscription: Subscription, limit: Optional[int] = None
 ) -> List[UsageData]:
-    """Fetch usage records for a specific user + provider pair."""
-    return (
+    """Fetch a subscription's usage records, most recent period first."""
+    query = (
         db.query(UsageData)
-        .filter(
-            UsageData.user_id == user_id,
-            UsageData.provider == provider,
-        )
+        .filter(UsageData.subscription_id == subscription.id)
         .order_by(UsageData.period_start.desc())
-        .all()
     )
+    if limit is not None:
+        query = query.limit(limit)
+    return query.all()
 
 
 def _get_active_subscriptions(db: Session, user_id: int) -> List[Subscription]:
@@ -52,7 +51,7 @@ def analyze_subscription(
     db: Session, user_id: int, subscription: Subscription
 ) -> Dict[str, Any]:
     """Run analysis for one subscription and attach context fields (no audit)."""
-    usage_records = _get_usage_for_subscription(db, user_id, subscription.provider)
+    usage_records = get_usage_for_subscription(db, subscription)
     result = analyze_usage(usage_records, subscription)
 
     # Attach context so the caller knows which subscription this belongs to

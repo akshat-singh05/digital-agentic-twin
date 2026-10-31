@@ -11,7 +11,7 @@ Response contract:
   Error   → {"status": "error",   "message": "<description>"}
 """
 
-from typing import List
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
@@ -32,8 +32,15 @@ from app.schemas import (
     UsageDataOut,
     NegotiationRoundOut,
     AuditLogOut,
+    PlanCatalogOut,
+    PlanHistoryOut,
+    UserPreferenceUpdate,
+    UserPreferenceOut,
+    ConsentUpdate,
+    ConsentOut,
 )
-from app.services import user_service, subscription_service
+from app.services import catalog_service, user_service, subscription_service
+from app.modules.privacy_mediator.service import list_consents, set_consent
 from app.modules.usage_analyzer.service import analyze_user_usage
 from app.modules.privacy_mediator.service import get_sanitized_usage
 from app.modules.negotiation_agent.service import run_negotiation
@@ -128,6 +135,89 @@ def get_user(user_id: int, db: Session = Depends(get_db)):
     return {"status": "success", "data": user}
 
 
+@router.get(
+    "/users/{user_id}/preferences",
+    response_model=SuccessResponse[UserPreferenceOut],
+    tags=["Users"],
+)
+def get_preferences(user_id: int, db: Session = Depends(get_db)):
+    """Get the constraints the twin must respect for this user."""
+    try:
+        prefs = user_service.get_preferences(db, user_id)
+    except ValueError as e:
+        _raise_not_found(e)
+    return {"status": "success", "data": prefs}
+
+
+@router.put(
+    "/users/{user_id}/preferences",
+    response_model=SuccessResponse[UserPreferenceOut],
+    tags=["Users"],
+)
+def replace_preferences(user_id: int, payload: UserPreferenceUpdate, db: Session = Depends(get_db)):
+    """Replace the user's preferences (omitted fields reset to defaults)."""
+    try:
+        prefs = user_service.replace_preferences(db, user_id, payload.model_dump())
+    except ValueError as e:
+        _raise_not_found(e)
+    return {"status": "success", "data": prefs}
+
+
+# ═════════════════════════════════════════════════════════════
+#  CONSENTS (PRIVACY MEDIATOR)
+# ═════════════════════════════════════════════════════════════
+@router.get(
+    "/users/{user_id}/consents",
+    response_model=SuccessResponse[List[ConsentOut]],
+    tags=["Privacy Mediator"],
+)
+def get_consents(user_id: int, db: Session = Depends(get_db)):
+    """List every consent scope and whether the user has granted it (default: no)."""
+    try:
+        consents = list_consents(db, user_id)
+    except ValueError as e:
+        _raise_not_found(e)
+    return {"status": "success", "data": consents}
+
+
+@router.put(
+    "/users/{user_id}/consents/{scope}",
+    response_model=SuccessResponse[ConsentOut],
+    tags=["Privacy Mediator"],
+)
+def update_consent(user_id: int, scope: str, payload: ConsentUpdate, db: Session = Depends(get_db)):
+    """Grant or revoke one consent scope.  The change is audited."""
+    try:
+        consent = set_consent(db, user_id, scope, payload.granted)
+    except ValueError as e:
+        _raise_not_found(e)
+    return {"status": "success", "data": consent}
+
+
+# ═════════════════════════════════════════════════════════════
+#  PLAN CATALOG
+# ═════════════════════════════════════════════════════════════
+@router.get(
+    "/plans",
+    response_model=SuccessResponse[List[PlanCatalogOut]],
+    tags=["Plan Catalog"],
+)
+def list_plans(
+    provider: Optional[str] = Query(None, max_length=100),
+    category: Optional[str] = Query(None, max_length=30),
+    include_unavailable: bool = False,
+    db: Session = Depends(get_db),
+):
+    """
+    List catalog plans, cheapest first.
+
+    Plans with ``source="demo_seed"`` are illustrative demo data, not live
+    provider pricing.
+    """
+    plans = catalog_service.list_plans(db, provider, category, include_unavailable)
+    return {"status": "success", "data": plans}
+
+
 # ═════════════════════════════════════════════════════════════
 #  SUBSCRIPTIONS
 # ═════════════════════════════════════════════════════════════
@@ -182,6 +272,20 @@ def get_subscription(sub_id: int, db: Session = Depends(get_db)):
     except ValueError as e:
         _raise_not_found(e)
     return {"status": "success", "data": sub}
+
+
+@router.get(
+    "/subscriptions/{sub_id}/history",
+    response_model=SuccessResponse[List[PlanHistoryOut]],
+    tags=["Subscriptions"],
+)
+def get_subscription_history(sub_id: int, db: Session = Depends(get_db)):
+    """List every applied change to a subscription, oldest first."""
+    try:
+        subscription_service.require_subscription(db, sub_id)
+    except ValueError as e:
+        _raise_not_found(e)
+    return {"status": "success", "data": subscription_service.get_plan_history(db, sub_id)}
 
 
 # ═════════════════════════════════════════════════════════════

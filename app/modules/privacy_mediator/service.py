@@ -1,18 +1,25 @@
 """
-Privacy Mediator Service — DB orchestration for usage-data sanitization.
+Privacy Mediator Service — usage-data sanitization and consent management.
 
-Validates the user, fetches their usage records, passes them through
-the pure sanitizer logic, and returns the sanitized output.
+Sanitization: validates the user, fetches their usage records, passes
+them through the pure sanitizer logic, and returns the sanitized output.
+
+Consent: records which scopes (see consent.py) a user has granted.
+Every change is written to the audit log.
 
 Follows the same service-layer pattern as usage_analyzer/service.py.
 """
 
+from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 from sqlalchemy.orm import Session
 
-from app.models import UsageData
+from app.models import Consent, UsageData
+from app.services.base_service import save, transactional
 from app.services.user_service import require_user
+from app.modules.audit_logger.service import build_audit_log
+from app.modules.privacy_mediator.consent import CONSENT_SCOPES, is_known_scope
 from app.modules.privacy_mediator.sanitizer import sanitize_records
 
 
@@ -72,3 +79,70 @@ def get_sanitized_usage(db: Session, user_id: int) -> Dict[str, Any]:
 
     # Step 5 — Return
     return {"sanitized_usage": sanitized}
+
+
+# ─────────────────────────────────────────────────────────────
+# Consent management
+# ─────────────────────────────────────────────────────────────
+def _consent_out(scope: str, row) -> Dict[str, Any]:
+    return {
+        "scope": scope,
+        "description": CONSENT_SCOPES[scope],
+        "granted": bool(row and row.granted),
+        "updated_at": row.updated_at if row else None,
+    }
+
+
+def list_consents(db: Session, user_id: int) -> List[Dict[str, Any]]:
+    """
+    Return the user's state for every known scope (ungranted → False).
+
+    Raises:
+        ValueError: If user not found.
+    """
+    require_user(db, user_id)
+    rows = {c.scope: c for c in db.query(Consent).filter(Consent.user_id == user_id)}
+    return [_consent_out(scope, rows.get(scope)) for scope in CONSENT_SCOPES]
+
+
+def has_consent(db: Session, user_id: int, scope: str) -> bool:
+    """True when the user has granted ``scope``."""
+    row = (
+        db.query(Consent)
+        .filter(Consent.user_id == user_id, Consent.scope == scope)
+        .first()
+    )
+    return bool(row and row.granted)
+
+
+def set_consent(db: Session, user_id: int, scope: str, granted: bool) -> Dict[str, Any]:
+    """
+    Grant or revoke one scope and audit the change in the same transaction.
+
+    Raises:
+        ValueError: If user not found or scope is unknown.
+    """
+    require_user(db, user_id)
+    if not is_known_scope(scope):
+        raise ValueError(
+            f"Unknown consent scope '{scope}'. Known: {', '.join(CONSENT_SCOPES)}"
+        )
+
+    row = (
+        db.query(Consent)
+        .filter(Consent.user_id == user_id, Consent.scope == scope)
+        .first()
+    )
+    previous = bool(row and row.granted)
+
+    with transactional(db):
+        if row is None:
+            row = Consent(user_id=user_id, scope=scope)
+        row.granted = granted
+        row.updated_at = datetime.now(timezone.utc)
+        save(db, row)
+        save(db, build_audit_log(db, user_id, "consent", {
+            "scope": scope, "granted": granted, "previous": previous,
+        }))
+
+    return _consent_out(scope, row)

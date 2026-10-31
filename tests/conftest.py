@@ -1,9 +1,10 @@
 """
 Shared pytest fixtures.
 
-The test database is a throwaway SQLite file.  DATABASE_URL must be set
-before any ``app`` import, because ``app.database`` builds its engine at
-import time.
+The test database is a throwaway SQLite file built by the real Alembic
+migrations once per session; each test then starts from empty tables.
+DATABASE_URL must be set before any ``app`` import, because
+``app.database`` builds its engine at import time.
 """
 
 import os
@@ -18,14 +19,23 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.database import Base, engine
+from app.db_migrations import migrate_to_head
 from app.main import app
 
 
+@pytest.fixture(scope="session", autouse=True)
+def migrated_db():
+    """Build the test schema with the real migrations."""
+    migrate_to_head(engine)
+    yield
+
+
 @pytest.fixture(autouse=True)
-def fresh_db():
+def fresh_db(migrated_db):
     """Give every test empty tables and a fixed random seed."""
-    Base.metadata.drop_all(bind=engine)
-    Base.metadata.create_all(bind=engine)
+    with engine.begin() as conn:
+        for table in reversed(Base.metadata.sorted_tables):
+            conn.execute(table.delete())
     random.seed(1234)
     yield
 

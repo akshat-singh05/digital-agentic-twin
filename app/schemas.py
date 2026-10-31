@@ -120,12 +120,17 @@ class SubscriptionCreate(BaseModel):
         description="JSON-encoded feature flags",
         examples=['{"5g": true, "hotspot": true}'],
     )
+    catalog_plan_id: Optional[int] = Field(
+        None, gt=0,
+        description="Catalog plan this subscription was taken from (must match provider)",
+    )
 
 
 class SubscriptionOut(BaseModel):
     """Public representation of a subscription."""
     id: int
     user_id: int
+    catalog_plan_id: Optional[int] = None
     provider: str
     plan_name: str
     monthly_cost: float
@@ -150,6 +155,10 @@ class UsageDataCreate(BaseModel):
         ..., min_length=1, max_length=100,
         description="Service provider name",
     )
+    subscription_id: Optional[int] = Field(
+        None, gt=0,
+        description="Subscription this usage belongs to (default: the user's plan with this provider)",
+    )
     period_start: datetime = Field(..., description="Start of the billing period")
     period_end: datetime = Field(..., description="End of the billing period")
     data_used_gb: float = Field(0.0, ge=0, description="Data consumed in GB")
@@ -170,6 +179,7 @@ class UsageDataOut(BaseModel):
     """Public representation of a usage record."""
     id: int
     user_id: int
+    subscription_id: Optional[int] = None
     provider: str
     period_start: datetime
     period_end: datetime
@@ -252,3 +262,70 @@ class PlanSwitchResult(BaseModel):
     subscription_id: int
     provider: str
     plan_name: str
+
+
+# ─────────────────────────────────────────────────────────────
+# Plan Catalog / Plan History
+# ─────────────────────────────────────────────────────────────
+class PlanCatalogOut(BaseModel):
+    """A plan offered by a provider."""
+    id: int
+    provider: str
+    plan_name: str
+    category: str
+    monthly_cost: float
+    data_limit_gb: Optional[float] = None
+    call_minutes_limit: Optional[int] = None
+    features: Optional[str] = None
+    is_available: bool
+    source: str                  # "demo_seed" = illustrative data, not live provider pricing
+
+    model_config = {"from_attributes": True}
+
+
+class PlanHistoryOut(BaseModel):
+    """One applied change to a subscription."""
+    id: int
+    subscription_id: int
+    recommendation_id: Optional[int] = None
+    change_type: str
+    previous_cost: float
+    new_cost: float
+    previous_terms: str
+    new_terms: str
+    reason: Optional[str] = None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+# ─────────────────────────────────────────────────────────────
+# Preferences / Consents
+# ─────────────────────────────────────────────────────────────
+class UserPreferenceUpdate(BaseModel):
+    """Full replacement of a user's preferences (omitted fields reset)."""
+    max_monthly_budget: Optional[float] = Field(None, gt=0, description="Upper bound on any recommended plan (₹/month)")
+    min_data_gb: Optional[float] = Field(None, ge=0, description="Recommended plans must offer at least this much data")
+    min_call_minutes: Optional[int] = Field(None, ge=0, description="Recommended plans must offer at least these minutes")
+    required_features: List[str] = Field(default_factory=list, max_length=20, examples=[["5g", "hotspot"]])
+    preferred_providers: List[str] = Field(default_factory=list, max_length=20, examples=[["Jio"]])
+    allow_provider_change: bool = Field(False, description="May the twin suggest a different provider?")
+
+
+class UserPreferenceOut(UserPreferenceUpdate):
+    """A user's stored preferences (defaults when none are stored)."""
+    user_id: int
+    updated_at: Optional[datetime] = None
+
+
+class ConsentUpdate(BaseModel):
+    """Grant or revoke one consent scope."""
+    granted: bool
+
+
+class ConsentOut(BaseModel):
+    """The user's state for one consent scope."""
+    scope: str
+    description: str
+    granted: bool
+    updated_at: Optional[datetime] = None

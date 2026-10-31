@@ -107,7 +107,8 @@ project/
 │   ├── main.py                  # FastAPI app entry point
 │   ├── config.py                # Centralized configuration
 │   ├── database.py              # SQLAlchemy engine, session, Base
-│   ├── models.py                # ORM models (5 tables)
+│   ├── models.py                # ORM models (12 tables)
+│   ├── db_migrations.py         # Runs Alembic migrations on startup
 │   ├── schemas.py               # Pydantic request/response schemas
 │   │
 │   ├── api/
@@ -143,6 +144,8 @@ project/
 │   └── utils/
 │       └── seed_data.py         # Database seeding utility
 │
+├── migrations/versions/         # Alembic schema migrations
+├── tests/                       # pytest suite
 ├── seed_data.py                 # Convenience CLI for seeding
 ├── test_integration.py          # End-to-end integration tests
 ├── requirements.txt
@@ -187,8 +190,16 @@ price the provider **accepted**, and never a higher price for the same capacity.
 | `POST` | `/api/subscriptions` | Create a subscription |
 | `GET` | `/api/subscriptions/user/{user_id}` | List user's subscriptions |
 | `GET` | `/api/subscriptions/{sub_id}` | Get a subscription by ID |
-| `POST` | `/api/usage` | Ingest a usage record |
+| `POST` | `/api/usage` | Ingest a usage record (linked to the user's subscription with that provider, or an explicit `subscription_id`) |
 | `GET` | `/api/usage/user/{user_id}` | List user's usage records |
+| `GET` | `/api/subscriptions/{sub_id}/history` | Every applied change to a subscription |
+| `GET` / `PUT` | `/api/users/{user_id}/preferences` | Budget, minimum data/minutes, required features, provider rules |
+| `GET` | `/api/users/{user_id}/consents` | Every consent scope and whether it is granted (default: denied) |
+| `PUT` | `/api/users/{user_id}/consents/{scope}` | Grant or revoke one scope (audited) |
+| `GET` | `/api/plans` | Plan catalog, cheapest first (`?provider=`, `?category=`) |
+
+> The seeded catalog is **demo data** (`source: "demo_seed"`), not live provider pricing.
+> Consents and preferences are stored now; the orchestrator starts enforcing them in the next phase.
 
 ### Intelligent Modules
 
@@ -392,42 +403,34 @@ curl -X POST http://127.0.0.1:8000/api/usage \
 
 ## 🗄 Database Schema
 
-```
-┌──────────┐       ┌────────────────┐       ┌───────────────────┐
-│  users   │──1:N──│ subscriptions  │──1:N──│ negotiation_history│
-│          │       │                │       │                   │
-│ id       │       │ id             │       │ id                │
-│ name     │       │ user_id (FK)   │       │ subscription_id   │
-│ email    │       │ provider       │       │ round_number      │
-│ phone    │       │ plan_name      │       │ agent_offer       │
-│ created_at│      │ monthly_cost   │       │ provider_counter  │
-└──────────┘       │ data_limit_gb  │       │ status            │
-     │             │ call_minutes.. │       │ notes             │
-     │             │ is_active      │       └───────────────────┘
-     │             │ previous_plan..│
-     │             └────────────────┘
-     │
-     ├──1:N──┌──────────────┐
-     │       │  usage_data  │
-     │       │              │
-     │       │ id           │
-     │       │ user_id (FK) │
-     │       │ provider     │
-     │       │ data_used_gb │
-     │       │ call_minutes │
-     │       │ billing_amt  │
-     │       └──────────────┘
-     │
-     └──1:N──┌──────────────┐
-             │  audit_logs  │
-             │              │
-             │ id           │
-             │ user_id (FK) │
-             │ action       │
-             │ module       │
-             │ description  │
-             │ details (JSON)│
-             └──────────────┘
+| Table | Purpose | Key relationships |
+|-------|---------|-------------------|
+| `users` | Registered users | — |
+| `subscriptions` | A user's current plan and terms | `user_id` → users, `catalog_plan_id` → plan_catalog |
+| `usage_data` | Per-period consumption | `user_id` → users, `subscription_id` → subscriptions |
+| `negotiation_history` | One row per negotiation round | `subscription_id` → subscriptions |
+| `audit_logs` | Plain-English record of every decision | `user_id` → users, `run_id` → agent_runs |
+| `plan_catalog` | Plans providers offer (the alternatives) | unique (`provider`, `plan_name`) |
+| `user_preferences` | Budget, minimums, required features (1:1) | `user_id` → users |
+| `consents` | Granted scopes; no row = denied | unique (`user_id`, `scope`) |
+| `plan_history` | Every applied change, with before/after terms | `subscription_id`, `recommendation_id` |
+| `agent_runs`, `agent_run_steps` | Orchestrator runs and per-agent steps | `user_id`, `run_id` |
+| `recommendations` | Proposed actions and their approval status | `user_id`, `subscription_id`, `run_id`, `proposed_plan_id` |
+
+`agent_runs`, `agent_run_steps` and `recommendations` exist in the schema; the
+orchestrator starts writing them in the next phase. SQLite foreign keys are
+enforced, so deleting a user cascades to their data.
+
+### Migrations
+
+The schema is managed by Alembic (`migrations/versions/`). The app upgrades the
+database to the latest revision on startup. A database created by an older
+version of the app (no `alembic_version` table) is recognised, stamped at the
+baseline, and upgraded in place, keeping its data.
+
+```bash
+alembic upgrade head                                   # apply migrations manually
+alembic revision --autogenerate -m "describe change"   # after editing app/models.py
 ```
 
 ---

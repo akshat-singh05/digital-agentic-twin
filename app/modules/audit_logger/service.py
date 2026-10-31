@@ -25,6 +25,7 @@ _MODULE_MAP = {
     "analysis": "usage_analyzer",
     "negotiation": "negotiation_agent",
     "switching": "plan_switching",
+    "consent": "privacy_mediator",
 }
 
 

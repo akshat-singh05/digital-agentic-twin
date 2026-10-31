@@ -16,11 +16,12 @@ from typing import Any, Dict, Optional, Tuple
 from sqlalchemy.orm import Session
 
 from app.core.errors import ConflictError
-from app.models import NegotiationHistory, Subscription, UsageData
+from app.models import NegotiationHistory, PlanHistory, Subscription
 from app.services.user_service import require_user
 from app.services.base_service import save, transactional
 from app.modules.audit_logger.service import build_audit_log
 from app.modules.plan_switching.executor import evaluate_switch
+from app.modules.usage_analyzer.service import get_usage_for_subscription
 
 
 # ─────────────────────────────────────────────────────────────
@@ -71,17 +72,11 @@ def _get_target_and_negotiation(
     return negotiation.subscription, negotiation
 
 
-def _get_recent_usage_stats(db: Session, user_id: int, provider: str) -> Dict[str, Any]:
+def _get_recent_usage_stats(db: Session, subscription: Subscription) -> Dict[str, Any]:
     """
     Compute average usage stats from the last 6 billing periods.
     """
-    records = (
-        db.query(UsageData)
-        .filter(UsageData.user_id == user_id, UsageData.provider == provider)
-        .order_by(UsageData.period_start.desc())
-        .limit(6)
-        .all()
-    )
+    records = get_usage_for_subscription(db, subscription, limit=6)
 
     if not records:
         return {"avg_data_used_gb": 0.0, "avg_call_minutes": 0.0}
@@ -140,7 +135,8 @@ def switch_plan(
         3. Reject outright if that negotiation ended without agreement.
         4. Gather recent usage stats and evaluate the switch (KPI + risk).
         5. Within a transaction:
-           a. If approved, snapshot the previous plan and apply the new price.
+           a. If approved, snapshot the previous plan, apply the new price
+              and add a plan_history entry.
            b. Write the audit log entry.
            If anything fails → automatic rollback via transactional().
         6. Return the decision result.
@@ -166,7 +162,7 @@ def switch_plan(
     current_cost = subscription.monthly_cost
 
     # Step 3 / 4 — Only an accepted deal has a price both sides agreed to
-    usage_stats = _get_recent_usage_stats(db, user_id, subscription.provider)
+    usage_stats = _get_recent_usage_stats(db, subscription)
 
     if negotiation.status != "accepted":
         proposed_cost = current_cost
@@ -198,11 +194,21 @@ def switch_plan(
     try:
         with transactional(db):
             if evaluation["applied"]:
-                # 5a. Snapshot for rollback, then apply the agreed price
-                subscription.previous_plan_snapshot = _snapshot_plan(subscription)
+                # 5a. Snapshot for rollback, apply the agreed price, record history
+                previous_terms = _snapshot_plan(subscription)
+                subscription.previous_plan_snapshot = previous_terms
                 subscription.monthly_cost = proposed_cost
                 db.add(subscription)
                 db.flush()
+                save(db, PlanHistory(
+                    subscription_id=subscription.id,
+                    change_type="price_change",
+                    previous_terms=previous_terms,
+                    new_terms=_snapshot_plan(subscription),
+                    previous_cost=current_cost,
+                    new_cost=proposed_cost,
+                    reason=evaluation["reason"],
+                ))
 
             # 5b. Write audit log
             save(db, build_audit_log(db, user_id, "switching", {

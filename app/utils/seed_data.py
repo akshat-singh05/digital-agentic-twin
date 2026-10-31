@@ -2,16 +2,19 @@
 Data Seeding Utility — Populate the database with realistic demo data.
 
 Generates:
+  - the plan catalog (every row marked source="demo_seed": illustrative
+    prices, not live provider data)
   - 5 users with realistic names, emails, and phone numbers
-  - 1–3 subscriptions per user across various providers
+  - 1–3 subscriptions per user, each linked to its catalog plan
   - 3–6 usage records per subscription (monthly billing periods)
+  - consent for every scope (demo users only — real users start with none)
 
 Usage:
     python -m app.utils.seed_data          # from project root
     python app/utils/seed_data.py          # direct execution
 
 Flags:
-    --reset   Drop and recreate all tables before seeding (fresh start)
+    --reset   Drop all tables and re-run migrations before seeding (fresh start)
 """
 
 import random
@@ -25,8 +28,12 @@ _PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
+from sqlalchemy import text
+
 from app.database import Base, engine, SessionLocal
-from app.models import User, Subscription, UsageData
+from app.db_migrations import migrate_to_head
+from app.models import Consent, PlanCatalog, User, Subscription, UsageData
+from app.modules.privacy_mediator.consent import CONSENT_SCOPES
 
 
 # ═════════════════════════════════════════════════════════════
@@ -40,6 +47,11 @@ USERS = [
     {"name": "Ananya Singh",   "email": "ananya.singh@example.com",   "phone": "+91-65432-10987"},
     {"name": "Vikram Reddy",   "email": "vikram.reddy@example.com",   "phone": "+91-54321-09876"},
 ]
+
+CATEGORY_BY_PROVIDER = {
+    "Jio": "mobile", "Airtel": "mobile", "Vi": "mobile",
+    "BSNL": "broadband", "Netflix": "streaming", "Spotify": "music", "AWS": "cloud",
+}
 
 # Provider catalog: (provider, plan_name, monthly_cost, data_limit_gb, call_minutes_limit, features)
 PLANS = [
@@ -74,6 +86,7 @@ USAGE_PROFILES = {
 
 def _generate_usage_records(
     user_id: int,
+    subscription_id: int,
     provider: str,
     data_limit_gb: float,
     call_minutes_limit: int,
@@ -122,6 +135,7 @@ def _generate_usage_records(
 
         records.append(UsageData(
             user_id=user_id,
+            subscription_id=subscription_id,
             provider=provider,
             period_start=period_start,
             period_end=period_end,
@@ -157,21 +171,39 @@ def _pick_plans_for_user(exclude_providers: set) -> list:
 #  MAIN SEEDER
 # ═════════════════════════════════════════════════════════════
 
+def _upsert_catalog(db) -> dict:
+    """Insert missing catalog plans; return {(provider, plan_name): id}."""
+    existing = {(p.provider, p.plan_name): p for p in db.query(PlanCatalog)}
+    for provider, plan_name, cost, data_limit, call_limit, features in PLANS:
+        if (provider, plan_name) not in existing:
+            plan = PlanCatalog(
+                provider=provider, plan_name=plan_name,
+                category=CATEGORY_BY_PROVIDER[provider], monthly_cost=cost,
+                data_limit_gb=data_limit, call_minutes_limit=call_limit,
+                features=features, is_available=True, source="demo_seed",
+            )
+            db.add(plan)
+            existing[(provider, plan_name)] = plan
+    db.flush()
+    return {key: plan.id for key, plan in existing.items()}
+
+
 def seed(reset: bool = False):
     """
     Populate the database with demo data.
 
     Args:
-        reset: If True, drop and recreate all tables first.
+        reset: If True, drop all tables and re-run migrations first.
     """
     if reset:
         print("🔄  Dropping all tables...")
         Base.metadata.drop_all(bind=engine)
-        print("🔄  Recreating tables...")
-        Base.metadata.create_all(bind=engine)
+        with engine.begin() as conn:
+            conn.execute(text("DROP TABLE IF EXISTS alembic_version"))
 
-    # Ensure tables exist even without reset
-    Base.metadata.create_all(bind=engine)
+    # Bring the schema to the latest migration (creates it on a fresh DB)
+    print("🔄  Applying migrations...")
+    migrate_to_head()
 
     db = SessionLocal()
 
@@ -185,6 +217,9 @@ def seed(reset: bool = False):
                 f"⚠️  Found {existing} existing seed user(s). "
                 f"Use --reset to start fresh, or seed will add on top."
             )
+
+        catalog_ids = _upsert_catalog(db)
+        print(f"  📚  Catalog: {len(catalog_ids)} demo plans (source=demo_seed)")
 
         profiles = list(USAGE_PROFILES.keys())
         total_subs = 0
@@ -214,12 +249,17 @@ def seed(reset: bool = False):
 
             print(f"  👤  User {user.id}: {user.name} ({user.email})")
 
+            # Demo users consent to every scope so the full pipeline can run.
+            for scope in CONSENT_SCOPES:
+                db.add(Consent(user_id=user.id, scope=scope, granted=True))
+
             # ── Create subscriptions ─────────────────────────
             plans = _pick_plans_for_user(exclude_providers=set())
 
             for provider, plan_name, cost, data_limit, call_limit, features in plans:
                 sub = Subscription(
                     user_id=user.id,
+                    catalog_plan_id=catalog_ids[(provider, plan_name)],
                     provider=provider,
                     plan_name=plan_name,
                     monthly_cost=cost,
@@ -239,6 +279,7 @@ def seed(reset: bool = False):
 
                 records = _generate_usage_records(
                     user_id=user.id,
+                    subscription_id=sub.id,
                     provider=provider,
                     data_limit_gb=data_limit or 0,
                     call_minutes_limit=call_limit or 0,
@@ -259,6 +300,7 @@ def seed(reset: bool = False):
 
         print(f"\n{'─'*60}")
         print(f"  ✅  Seeding complete!")
+        print(f"      Catalog plans: {len(catalog_ids)}")
         print(f"      Users:         {len(USERS)}")
         print(f"      Subscriptions: {total_subs}")
         print(f"      Usage records: {total_usage}")

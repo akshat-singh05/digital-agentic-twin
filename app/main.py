@@ -1,7 +1,7 @@
 """
 Agentic Digital Twin — FastAPI Application Entry Point.
 
-Configures logging, creates database tables, registers routes,
+Configures logging, applies database migrations, registers routes,
 serves the frontend dashboard, and provides structured error handling.
 """
 
@@ -17,7 +17,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.config import APP_NAME, APP_VERSION
 from app.core.logger import setup_logging, get_logger
-from app.database import Base, engine
+from app.db_migrations import migrate_to_head
 
 # Configure logging FIRST — before any module-level getLogger() calls propagate
 setup_logging()
@@ -37,8 +37,8 @@ FRONTEND_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "fronten
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup / shutdown lifecycle hook."""
-    logger.info("Creating database tables (if not exist)...")
-    Base.metadata.create_all(bind=engine)
+    logger.info("Applying database migrations...")
+    migrate_to_head()
     logger.info(
         "%s v%s started successfully — ready to accept requests",
         APP_NAME, APP_VERSION,

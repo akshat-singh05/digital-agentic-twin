@@ -126,6 +126,23 @@ def _format_switching(payload: Dict[str, Any]) -> str:
     )
 
 
+def _format_consent(payload: Dict[str, Any]) -> str:
+    """
+    Generate an explanation for a consent change.
+
+    Expected payload keys:
+        scope, granted, previous
+    """
+    scope = _safe_get(payload, "scope", "unknown")
+    granted = _safe_get(payload, "granted", False)
+    previous = _safe_get(payload, "previous", False)
+
+    verb = "granted" if granted else "revoked"
+    if granted == previous:
+        return f"Consent for '{scope}' re-confirmed as {verb} (no change)."
+    return f"Consent {verb} for '{scope}'."
+
+
 # ─────────────────────────────────────────────────────────────
 # Public API
 # ─────────────────────────────────────────────────────────────
@@ -133,6 +150,7 @@ _FORMATTERS = {
     "analysis": _format_analysis,
     "negotiation": _format_negotiation,
     "switching": _format_switching,
+    "consent": _format_consent,
 }
 
 
