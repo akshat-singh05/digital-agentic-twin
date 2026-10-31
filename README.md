@@ -168,9 +168,14 @@ All endpoints are prefixed with `/api`. Responses follow a uniform envelope:
 // Success
 { "status": "success", "data": { ... } }
 
-// Error
+// Error (404 not found, 409 state conflict, 422 validation — which also adds "errors")
 { "status": "error", "message": "..." }
 ```
+
+The pipeline acts on a single **optimization target**: the most underutilized active
+subscription. Negotiation and switching both run against it. When no subscription is
+underutilized they are skipped (`"skipped"` in the response). A switch applies only a
+price the provider **accepted**, and never a higher price for the same capacity.
 
 ### Core Data
 
@@ -258,12 +263,16 @@ Open your browser and navigate to:
 - **Swagger UI** → [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
 - **ReDoc** → [http://127.0.0.1:8000/redoc](http://127.0.0.1:8000/redoc)
 
-### 7. Run integration tests (optional)
+### 7. Run the tests
 
 ```bash
-# With the server running in another terminal:
-python test_integration.py
+pip install -r requirements-dev.txt
+pytest
 ```
+
+The suite uses a throwaway SQLite database and needs no running server.
+`test_integration.py` is an older smoke script that runs against a live server
+(`python test_integration.py` with uvicorn running).
 
 ---
 

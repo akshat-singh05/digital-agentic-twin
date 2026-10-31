@@ -7,7 +7,7 @@ Designed to be easily replaced with an ML model in the future.
 """
 
 from statistics import mean
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 
 def analyze_usage(
@@ -100,6 +100,22 @@ def analyze_usage(
         "usage_category": usage_category,
         "confidence_score": confidence_score,
     }
+
+
+def pick_optimization_target(analyses: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """
+    Choose the single subscription the downstream agents should act on.
+
+    Only underutilized ("downgrade") subscriptions qualify; among them the
+    one with the largest unused spend (``savings_estimate``) wins.
+
+    Returns:
+        The chosen analysis dict, or None when there is no opportunity.
+    """
+    candidates = [a for a in analyses if a["recommendation"] == "downgrade"]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda a: a.get("savings_estimate", 0))
 
 
 def pick_best_plan(analyses: List[Dict[str, Any]]) -> Dict[str, Any]:

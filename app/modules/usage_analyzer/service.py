@@ -3,17 +3,22 @@ Usage Analyzer Service — DB orchestration for usage analysis.
 
 Supports both single and multi-subscription analysis.
 Fetches all active subscriptions, runs the pure analyzer on each,
-and picks the best plan.
+and picks the subscription with the clearest optimization opportunity.
 """
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from sqlalchemy.orm import Session
 
 from app.core.logger import get_logger
 from app.models import Subscription, UsageData
 from app.services.user_service import require_user
-from app.modules.usage_analyzer.analyzer import analyze_usage, pick_best_plan
+from app.modules.audit_logger.service import create_audit_log
+from app.modules.usage_analyzer.analyzer import (
+    analyze_usage,
+    pick_best_plan,
+    pick_optimization_target,
+)
 
 logger = get_logger(__name__)
 
@@ -33,10 +38,20 @@ def _get_usage_for_subscription(
     )
 
 
-def _analyze_single(
+def _get_active_subscriptions(db: Session, user_id: int) -> List[Subscription]:
+    """Return a user's active subscriptions, newest first."""
+    return (
+        db.query(Subscription)
+        .filter(Subscription.user_id == user_id, Subscription.is_active == True)
+        .order_by(Subscription.created_at.desc(), Subscription.id.desc())
+        .all()
+    )
+
+
+def analyze_subscription(
     db: Session, user_id: int, subscription: Subscription
 ) -> Dict[str, Any]:
-    """Run analysis for one subscription and attach context fields."""
+    """Run analysis for one subscription and attach context fields (no audit)."""
     usage_records = _get_usage_for_subscription(db, user_id, subscription.provider)
     result = analyze_usage(usage_records, subscription)
 
@@ -50,21 +65,32 @@ def _analyze_single(
     return result
 
 
+def find_optimization_target(db: Session, user_id: int) -> Optional[Dict[str, Any]]:
+    """
+    Return the analysis of the subscription the other agents should act on,
+    or None when no active subscription is underutilized.  Writes no audit log.
+    """
+    analyses = [
+        analyze_subscription(db, user_id, sub)
+        for sub in _get_active_subscriptions(db, user_id)
+    ]
+    return pick_optimization_target(analyses)
+
+
 def analyze_user_usage(db: Session, user_id: int) -> Dict[str, Any]:
     """
-    Analyze ALL active subscriptions for a user and pick the best plan.
+    Analyze ALL active subscriptions for a user and record the decision.
 
     Steps:
         1. Validate user exists.
         2. Fetch all active subscriptions.
         3. For each subscription, fetch matching usage records and analyze.
-        4. Pick the best plan from the results.
-        5. Return comparison + best-plan recommendation.
+        4. Pick the optimization target (largest underutilized plan) and
+           the best-fit plan.
+        5. Write one audit log entry and return the comparison.
 
-    Backward-compatible:
-        When a user has only one subscription the response shape is
-        identical to the original single-subscription output, with an
-        added ``analysis`` list containing one entry.
+    The top-level fields describe the optimization target when there is
+    one, otherwise the best-fit plan.
 
     Raises:
         ValueError: If user not found.
@@ -74,15 +100,11 @@ def analyze_user_usage(db: Session, user_id: int) -> Dict[str, Any]:
     logger.info("Analyzing usage for user_id=%d", user_id)
 
     # Step 2 — Get ALL active subscriptions
-    subscriptions = (
-        db.query(Subscription)
-        .filter(Subscription.user_id == user_id, Subscription.is_active == True)
-        .order_by(Subscription.created_at.desc())
-        .all()
-    )
+    subscriptions = _get_active_subscriptions(db, user_id)
 
     if not subscriptions:
-        return {
+        response = {
+            "user_id": user_id,
             "efficiency": 0,
             "avg_data_usage": 0,
             "avg_call_usage": 0,
@@ -92,34 +114,38 @@ def analyze_user_usage(db: Session, user_id: int) -> Dict[str, Any]:
             "usage_category": "unknown",
             "confidence_score": 0,
             "best_plan": None,
+            "optimization_target": None,
             "analysis": [],
         }
+        create_audit_log(db, user_id, "analysis", response)
+        return response
 
     # Step 3 — Analyze each subscription
     analyses = [
-        _analyze_single(db, user_id, sub)
+        analyze_subscription(db, user_id, sub)
         for sub in subscriptions
     ]
 
-    # Step 4 — Pick best plan
+    # Step 4 — Pick target and best plan
+    target = pick_optimization_target(analyses)
     best = pick_best_plan(analyses)
+    headline = target or best
 
     # Step 5 — Build response
-    # For backward compatibility when there's only 1 subscription,
-    # the top-level fields mirror the single-analysis result.
     response = {
         "user_id": user_id,
-        "efficiency": best["efficiency"],
-        "avg_data_usage": best["avg_data_usage"],
-        "avg_call_usage": best["avg_call_usage"],
-        "recommendation": best["recommendation"],
-        "message": best["message"],
-        "savings_estimate": best["savings_estimate"],
-        "usage_category": best["usage_category"],
-        "confidence_score": best["confidence_score"],
-        "provider": best["provider"],
-        "plan_name": best["plan_name"],
-        "monthly_cost": best["monthly_cost"],
+        "subscription_id": headline["subscription_id"],
+        "efficiency": headline["efficiency"],
+        "avg_data_usage": headline["avg_data_usage"],
+        "avg_call_usage": headline["avg_call_usage"],
+        "recommendation": headline["recommendation"],
+        "message": headline["message"],
+        "savings_estimate": headline["savings_estimate"],
+        "usage_category": headline["usage_category"],
+        "confidence_score": headline["confidence_score"],
+        "provider": headline["provider"],
+        "plan_name": headline["plan_name"],
+        "monthly_cost": headline["monthly_cost"],
         "best_plan": {
             "subscription_id": best["subscription_id"],
             "provider": best["provider"],
@@ -131,7 +157,15 @@ def analyze_user_usage(db: Session, user_id: int) -> Dict[str, Any]:
             "usage_category": best["usage_category"],
             "confidence_score": best["confidence_score"],
         },
+        "optimization_target": {
+            "subscription_id": target["subscription_id"],
+            "provider": target["provider"],
+            "plan_name": target["plan_name"],
+            "monthly_cost": target["monthly_cost"],
+            "savings_estimate": target["savings_estimate"],
+        } if target else None,
         "analysis": analyses,
     }
 
+    create_audit_log(db, user_id, "analysis", response)
     return response

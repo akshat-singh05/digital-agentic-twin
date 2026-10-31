@@ -1,9 +1,11 @@
 """
-End-to-end integration test for Plan Switching + Audit Logger modules.
+End-to-end smoke script for Plan Switching + Audit Logger against a
+running server.  The automated test suite lives in tests/ (run: pytest).
 Uses only stdlib (urllib) — no external dependencies required.
 """
 
 import json
+import time
 import urllib.request
 import urllib.error
 import sys
@@ -29,7 +31,7 @@ def _get(path):
 
 
 def main():
-    ts = "20260408"  # unique suffix to avoid email collisions
+    ts = time.strftime("%Y%m%d%H%M%S")  # unique suffix to avoid email collisions
     print("=" * 60)
     print("  INTEGRATION TEST — Plan Switching + Audit Logger")
     print("=" * 60)

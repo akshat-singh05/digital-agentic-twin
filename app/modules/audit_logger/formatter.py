@@ -43,8 +43,8 @@ def _format_analysis(payload: Dict[str, Any]) -> str:
 
     if recommendation == "downgrade":
         return (
-            f"Plan downgraded: usage at {usage_pct}% on {provider} ({plan_name}), "
-            f"estimated savings ₹{savings}/month."
+            f"Downgrade recommended: usage at {usage_pct}% on {provider} ({plan_name}), "
+            f"estimated unused spend ₹{savings}/month."
         )
     elif recommendation == "upgrade":
         return (
@@ -61,6 +61,8 @@ def _format_analysis(payload: Dict[str, Any]) -> str:
             f"Analysis skipped for {provider} ({plan_name}): "
             f"no usage data available."
         )
+    elif recommendation == "no_subscription":
+        return "Analysis skipped: user has no active subscription."
     else:
         return (
             f"Analysis completed for {provider} ({plan_name}): "
@@ -102,13 +104,13 @@ def _format_switching(payload: Dict[str, Any]) -> str:
     Generate an explanation for a plan-switching decision.
 
     Expected payload keys:
-        applied, risk_flag, previous_cost, proposed_cost,
-        projected_cost, reason
+        applied, risk_flag, previous_cost, proposed_cost, reason
     """
     applied = _safe_get(payload, "applied", False)
     risk = _safe_get(payload, "risk_flag", "unknown")
     prev_cost = _safe_get(payload, "previous_cost", 0)
     new_cost = _safe_get(payload, "proposed_cost", 0)
+    reason = _safe_get(payload, "reason", "")
 
     if applied:
         savings = round(prev_cost - new_cost, 2)
@@ -116,11 +118,12 @@ def _format_switching(payload: Dict[str, Any]) -> str:
             f"Switch applied: cost reduced ₹{prev_cost} → ₹{new_cost} "
             f"(saving ₹{savings}/month), risk level {risk}."
         )
-    else:
-        return (
-            f"Switch rejected due to {risk} risk of limit breach. "
-            f"Proposed cost ₹{new_cost} vs current ₹{prev_cost}."
-        )
+    if reason:
+        return reason
+    return (
+        f"Switch rejected. Proposed cost ₹{new_cost} vs current ₹{prev_cost}, "
+        f"risk level {risk}."
+    )
 
 
 # ─────────────────────────────────────────────────────────────

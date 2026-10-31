@@ -8,9 +8,11 @@ Executes the full Agentic Digital Twin cycle in sequence:
     4. Attempt plan switching  (Plan Switching)
     5. Log all actions         (Audit Logger)
 
-Each step's output feeds into the next.  If any step fails the
-pipeline continues with partial results and the final_status
-reflects the outcome.
+The analyzer picks one optimization target (the most underutilized
+subscription); negotiation and switching both act on that subscription.
+With no target they are skipped.  Each agent writes its own audit entry.
+If any step fails the pipeline continues with partial results and the
+final_status reflects the outcome.
 """
 
 from typing import Any, Dict
@@ -23,7 +25,6 @@ from app.modules.usage_analyzer.service import analyze_user_usage
 from app.modules.privacy_mediator.service import get_sanitized_usage
 from app.modules.negotiation_agent.service import run_negotiation
 from app.modules.plan_switching.service import switch_plan
-from app.modules.audit_logger.service import create_audit_log
 
 logger = get_logger(__name__)
 
@@ -66,8 +67,10 @@ def _determine_final_status(
     """
     Determine the overall pipeline outcome.
 
+    Skipped steps are left out of ``step_results`` and do not count.
+
     Returns:
-        "completed" – every step succeeded
+        "completed" – every step that ran succeeded
         "partial"   – some steps succeeded, some failed
         "failed"    – all steps failed
     """
@@ -89,11 +92,11 @@ def run_full_cycle(db: Session, user_id: int) -> Dict[str, Any]:
     Execute the full intelligent pipeline for a user.
 
     Pipeline order:
-        1. Usage analysis   → efficiency, recommendation, savings
+        1. Usage analysis   → efficiency, recommendation, optimization target
         2. Data sanitization → differentially-private usage records
-        3. Negotiation       → multi-round price negotiation
+        3. Negotiation       → multi-round price negotiation on the target
         4. Plan switching    → KPI-validated plan change with rollback
-        5. Audit logging     → explainable logs for every step
+        Each agent writes its own explainable audit entry.
 
     Args:
         db:      Active SQLAlchemy session.
@@ -113,6 +116,8 @@ def run_full_cycle(db: Session, user_id: int) -> Dict[str, Any]:
 
     errors: list = []
     step_results: Dict[str, Any] = {}
+    skipped: Dict[str, str] = {}
+    negotiation = switching = None
 
     # ── Step 1: Analyze usage ────────────────────────────────
     analysis = _run_step(
@@ -121,6 +126,7 @@ def run_full_cycle(db: Session, user_id: int) -> Dict[str, Any]:
         errors,
     )
     step_results["analysis"] = analysis
+    target = (analysis or {}).get("optimization_target")
 
     # ── Step 2: Sanitize data ────────────────────────────────
     sanitized = _run_step(
@@ -130,59 +136,44 @@ def run_full_cycle(db: Session, user_id: int) -> Dict[str, Any]:
     )
     step_results["sanitization"] = sanitized
 
-    # ── Step 3: Run negotiation ──────────────────────────────
-    negotiation = _run_step(
-        "Negotiation",
-        lambda: run_negotiation(db, user_id),
-        errors,
-    )
-    step_results["negotiation"] = negotiation
+    if target is None:
+        reason = (
+            "Usage analysis failed." if analysis is None
+            else "No underutilized subscription — nothing to negotiate."
+        )
+        skipped = {"negotiation": reason, "switching": reason}
+    else:
+        target_id = target["subscription_id"]
 
-    # ── Step 4: Plan switching ───────────────────────────────
-    switching = _run_step(
-        "Plan Switching",
-        lambda: switch_plan(db, user_id),
-        errors,
-    )
-    step_results["switching"] = switching
-
-    # ── Step 5: Audit logging ────────────────────────────────
-    # Log each completed step through the explainable audit logger.
-    audit_entries = []
-
-    if analysis is not None:
-        _run_step(
-            "Audit Log (analysis)",
-            lambda: create_audit_log(db, user_id, "analysis", analysis),
+        # ── Step 3: Run negotiation on the target ────────────
+        negotiation = _run_step(
+            "Negotiation",
+            lambda: run_negotiation(db, user_id, subscription_id=target_id),
             errors,
         )
-        audit_entries.append("analysis")
+        step_results["negotiation"] = negotiation
 
-    if negotiation is not None:
-        _run_step(
-            "Audit Log (negotiation)",
-            lambda: create_audit_log(db, user_id, "negotiation", negotiation),
-            errors,
-        )
-        audit_entries.append("negotiation")
+        # ── Step 4: Plan switching on the same target ────────
+        if negotiation is None:
+            skipped["switching"] = "Negotiation failed."
+        else:
+            switching = _run_step(
+                "Plan Switching",
+                lambda: switch_plan(db, user_id, subscription_id=target_id),
+                errors,
+            )
+            step_results["switching"] = switching
 
-    if switching is not None:
-        _run_step(
-            "Audit Log (switching)",
-            lambda: create_audit_log(db, user_id, "switching", switching),
-            errors,
-        )
-        audit_entries.append("switching")
+    # Each agent audited itself; report which decisions were recorded.
+    audit_entries = [
+        action for action, result in (
+            ("analysis", analysis),
+            ("negotiation", negotiation),
+            ("switching", switching),
+        ) if result is not None
+    ]
 
-    # ── Determine final status ───────────────────────────────
-    # Only the four core steps count toward final status
-    core_steps = {
-        "analysis": analysis,
-        "negotiation": negotiation,
-        "switching": switching,
-        "sanitization": sanitized,
-    }
-    final_status = _determine_final_status(core_steps, errors)
+    final_status = _determine_final_status(step_results, errors)
 
     logger.info(
         "Pipeline finished for user_id=%d — final_status=%s, errors=%d",
@@ -197,6 +188,7 @@ def run_full_cycle(db: Session, user_id: int) -> Dict[str, Any]:
         "negotiation": negotiation,
         "switching": switching,
         "audit_logged": audit_entries,
+        "skipped": skipped or None,
         "errors": errors if errors else None,
         "final_status": final_status,
     }

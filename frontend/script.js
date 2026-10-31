@@ -138,7 +138,7 @@ async function loadUsers() {
     usersCache = res.data || [];
     const sel = $('globalUserSelect');
     sel.innerHTML = '<option value="">— Select User —</option>' +
-      usersCache.map(u => `<option value="${u.id}">${u.name} (ID: ${u.id})</option>`).join('');
+      usersCache.map(u => `<option value="${u.id}">${esc(u.name)} (ID: ${u.id})</option>`).join('');
     if (usersCache.length > 0) {
       sel.value = usersCache[0].id;
       selectedUser = usersCache[0].id;
@@ -326,8 +326,8 @@ async function runFullCycle() {
     if (d.errors) {
       steps.forEach(s => {
         if (!d.analysis && s === 'ps-analyze') $(s).className = 'pipeline-step error';
-        if (!d.negotiation && s === 'ps-negotiate') $(s).className = 'pipeline-step error';
-        if (!d.switching && s === 'ps-switch') $(s).className = 'pipeline-step error';
+        if (!d.negotiation && !d.skipped?.negotiation && s === 'ps-negotiate') $(s).className = 'pipeline-step error';
+        if (!d.switching && !d.skipped?.switching && s === 'ps-switch') $(s).className = 'pipeline-step error';
       });
     }
 
@@ -356,13 +356,19 @@ async function runFullCycle() {
           <div class="result-value">${d.switching.applied ? '✅ Applied' : '⏹ Skipped'}</div>
           <div class="result-sub">Risk: ${d.switching.risk_flag} · ₹${d.switching.projected_cost}</div>
         </div>` : ''}
+        ${d.skipped?.negotiation ? `
+        <div class="result-card">
+          <div class="result-title">🤝 Negotiation &amp; Switch</div>
+          <div class="result-value">⏭ Skipped</div>
+          <div class="result-sub">${esc(d.skipped.negotiation)}</div>
+        </div>` : ''}
         <div class="result-card">
           <div class="result-title">📋 Pipeline Status</div>
           <div class="result-value">${statusBadge}</div>
           <div class="result-sub">${(d.audit_logged || []).length} audit entries logged</div>
         </div>
       </div>
-      ${d.errors ? `<div class="result-message" style="border-color:var(--warning);background:var(--warning-bg)"><span class="msg-icon">⚠️</span>${d.errors.join('<br>')}</div>` : ''}
+      ${d.errors ? `<div class="result-message" style="border-color:var(--warning);background:var(--warning-bg)"><span class="msg-icon">⚠️</span>${d.errors.map(esc).join('<br>')}</div>` : ''}
     `;
 
     toast('success', 'Pipeline Complete', `Full cycle finished with status: ${status}`);

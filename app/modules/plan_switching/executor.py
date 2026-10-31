@@ -9,6 +9,7 @@ No database access, no framework imports.
 
 KPI rules:
   - Downgrade → cost must drop by ≥ MINIMUM_SAVINGS_PCT %
+  - Same or higher cost → the plan must add capacity (higher or unlimited limits)
   - Usage must not exceed new plan limits by more than SLA_BREACH_MARGIN
   - Risk flag:  low / medium / high  (high → auto-reject)
 """
@@ -79,6 +80,23 @@ def _assess_call_risk(
     if ratio > (1 - SLA_BREACH_MARGIN):
         return "medium"
     return "low"
+
+
+def _limit_increases(current_limit: Optional[float], proposed_limit: Optional[float]) -> bool:
+    """True when the proposed limit is strictly larger (NULL = unlimited)."""
+    if current_limit is None:
+        return False                      # nothing beats unlimited
+    if proposed_limit is None:
+        return True                       # capped → unlimited
+    return proposed_limit > current_limit
+
+
+def _adds_capacity(current_plan: Dict[str, Any], proposed_plan: Dict[str, Any]) -> bool:
+    """True when the proposed plan raises the data or call-minute limit."""
+    return any(
+        _limit_increases(current_plan.get(key), proposed_plan.get(key))
+        for key in ("data_limit_gb", "call_minutes_limit")
+    )
 
 
 def _worst_risk(*flags: str) -> str:
@@ -154,6 +172,18 @@ def evaluate_switch(
                 f"Switch rejected: cost reduction of {reduction_pct}% "
                 f"is below the minimum threshold of {MINIMUM_SAVINGS_PCT}%. "
                 f"Savings too small to justify plan change."
+            ),
+            "projected_cost": projected_cost,
+            "risk_flag": risk_flag,
+        }
+
+    # Rule 3: Paying the same or more is only worth it for more capacity
+    if not downgrade and not _adds_capacity(current_plan, proposed_plan):
+        return {
+            "applied": False,
+            "reason": (
+                f"Switch rejected: proposed cost ₹{proposed_cost} is not lower than "
+                f"the current ₹{current_cost} and the plan offers no additional capacity."
             ),
             "projected_cost": projected_cost,
             "risk_flag": risk_flag,

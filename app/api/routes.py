@@ -13,9 +13,10 @@ Response contract:
 
 from typing import List
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
+from app.core.errors import ConflictError
 from app.core.logger import get_logger
 
 logger = get_logger(__name__)
@@ -37,7 +38,7 @@ from app.modules.usage_analyzer.service import analyze_user_usage
 from app.modules.privacy_mediator.service import get_sanitized_usage
 from app.modules.negotiation_agent.service import run_negotiation
 from app.modules.plan_switching.service import switch_plan
-from app.modules.audit_logger.service import create_audit_log, get_user_audit_logs
+from app.modules.audit_logger.service import get_user_audit_logs
 from app.services.system_service import run_full_cycle
 
 router = APIRouter()
@@ -52,6 +53,21 @@ def _raise_not_found(e: ValueError):
         status_code=404,
         detail={"status": "error", "message": str(e)},
     )
+
+
+def _raise_for(e: ValueError):
+    """Convert a service ValueError into 409 (state conflict) or 404 (not found)."""
+    status_code = 409 if isinstance(e, ConflictError) else 404
+    raise HTTPException(
+        status_code=status_code,
+        detail={"status": "error", "message": str(e)},
+    )
+
+
+# ── Pagination parameters (bounded to protect the database) ──
+_Skip = Query(0, ge=0, description="Number of records to skip")
+_UserLimit = Query(50, ge=1, le=200, description="Maximum records to return")
+_AuditLimit = Query(100, ge=1, le=500, description="Maximum records to return")
 
 
 def _raise_validation(e: ValueError):
@@ -92,7 +108,7 @@ def create_user(payload: UserCreate, db: Session = Depends(get_db)):
     response_model=SuccessResponse[List[UserOut]],
     tags=["Users"],
 )
-def list_users(skip: int = 0, limit: int = 50, db: Session = Depends(get_db)):
+def list_users(skip: int = _Skip, limit: int = _UserLimit, db: Session = Depends(get_db)):
     """List all registered users with pagination."""
     users = user_service.get_all_users(db, skip=skip, limit=limit)
     return {"status": "success", "data": users}
@@ -238,8 +254,8 @@ def get_negotiation_history(subscription_id: int, db: Session = Depends(get_db))
 )
 def get_audit_logs(
     user_id: int,
-    skip: int = 0,
-    limit: int = 100,
+    skip: int = _Skip,
+    limit: int = _AuditLimit,
     db: Session = Depends(get_db),
 ):
     """Retrieve audit logs for a user, most recent first, with pagination."""
@@ -315,7 +331,7 @@ def negotiate_for_user(user_id: int, db: Session = Depends(get_db)):
     try:
         result = run_negotiation(db, user_id)
     except ValueError as e:
-        _raise_not_found(e)
+        _raise_for(e)
     return {"status": "success", "data": result}
 
 
@@ -337,7 +353,7 @@ def switch_user_plan(user_id: int, db: Session = Depends(get_db)):
     try:
         result = switch_plan(db, user_id)
     except ValueError as e:
-        _raise_not_found(e)
+        _raise_for(e)
     return {"status": "success", "data": result}
 
 
@@ -351,8 +367,8 @@ def switch_user_plan(user_id: int, db: Session = Depends(get_db)):
 )
 def list_audit_logs(
     user_id: int,
-    skip: int = 0,
-    limit: int = 100,
+    skip: int = _Skip,
+    limit: int = _AuditLimit,
     db: Session = Depends(get_db),
 ):
     """

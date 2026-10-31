@@ -28,6 +28,32 @@ _MODULE_MAP = {
 }
 
 
+def build_audit_log(
+    db: Session,
+    user_id: int,
+    action_type: str,
+    payload: Dict[str, Any],
+) -> AuditLog:
+    """
+    Build (but do not persist) an audit entry with a human-readable message.
+
+    Use this when the entry must be committed in the same transaction as
+    the decision it describes; otherwise use ``create_audit_log``.
+
+    Raises:
+        ValueError: If user not found or action_type is invalid.
+    """
+    require_user(db, user_id)
+
+    return AuditLog(
+        user_id=user_id,
+        action=action_type,
+        module=_MODULE_MAP.get(action_type, action_type),
+        description=format_audit_message(action_type, payload),
+        details=json.dumps(payload, default=str),
+    )
+
+
 def create_audit_log(
     db: Session,
     user_id: int,
@@ -36,12 +62,6 @@ def create_audit_log(
 ) -> AuditLog:
     """
     Build a human-readable audit message and persist it.
-
-    Steps:
-        1. Validate user exists.
-        2. Generate message via the pure formatter.
-        3. Save to audit_logs within a transaction.
-        4. Return the created AuditLog entry.
 
     Args:
         db:          Active SQLAlchemy session.
@@ -55,22 +75,7 @@ def create_audit_log(
     Raises:
         ValueError: If user not found or action_type is invalid.
     """
-    # Step 1 — Validate user
-    require_user(db, user_id)
-
-    # Step 2 — Generate human-readable message
-    description = format_audit_message(action_type, payload)
-
-    # Step 3 — Persist
-    module = _MODULE_MAP.get(action_type, action_type)
-
-    audit = AuditLog(
-        user_id=user_id,
-        action=action_type,
-        module=module,
-        description=description,
-        details=json.dumps(payload, default=str),
-    )
+    audit = build_audit_log(db, user_id, action_type, payload)
 
     with transactional(db):
         save(db, audit)

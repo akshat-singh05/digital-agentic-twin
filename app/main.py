@@ -9,9 +9,11 @@ import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.config import APP_NAME, APP_VERSION
 from app.core.logger import setup_logging, get_logger
@@ -69,6 +71,36 @@ app.add_middleware(
 
 
 # ── Global exception handlers ───────────────────────────────
+# Every error leaves the API as {"status": "error", "message": "..."}.
+@app.exception_handler(StarletteHTTPException)
+async def http_error_handler(request: Request, exc: StarletteHTTPException):
+    """Unwrap HTTPException details (routes pass the envelope as detail)."""
+    detail = exc.detail
+    message = detail.get("message", str(detail)) if isinstance(detail, dict) else str(detail)
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"status": "error", "message": message},
+        headers=getattr(exc, "headers", None),
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def request_validation_handler(request: Request, exc: RequestValidationError):
+    """Flatten Pydantic validation errors into the standard envelope."""
+    errors = [
+        {"loc": list(err.get("loc", [])), "msg": err.get("msg", ""), "type": err.get("type", "")}
+        for err in exc.errors()
+    ]
+    message = "; ".join(
+        f"{'.'.join(str(p) for p in err['loc'] if p != 'body') or 'body'}: {err['msg']}"
+        for err in errors
+    )
+    return JSONResponse(
+        status_code=422,
+        content={"status": "error", "message": message, "errors": errors},
+    )
+
+
 @app.exception_handler(ValueError)
 async def value_error_handler(request: Request, exc: ValueError):
     """Catch unhandled ValueErrors and return a clean 422 response."""

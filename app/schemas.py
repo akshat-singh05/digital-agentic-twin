@@ -9,7 +9,7 @@ Conventions:
 """
 
 from datetime import datetime
-from typing import Any, Generic, List, Optional, TypeVar
+from typing import Any, Dict, Generic, List, Optional, TypeVar
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -30,6 +30,7 @@ class ErrorResponse(BaseModel):
     """Uniform error envelope returned on failures."""
     status: str = "error"
     message: str
+    errors: Optional[List[Dict[str, Any]]] = None   # field-level detail on 422
 
 
 # ─────────────────────────────────────────────────────────────

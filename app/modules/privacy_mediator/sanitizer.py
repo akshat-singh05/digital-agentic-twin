@@ -10,6 +10,7 @@ No database access, no framework imports.
 Designed to be easily swapped for a stronger DP mechanism later.
 """
 
+import math
 import random
 from typing import Any, Dict, List
 
@@ -24,10 +25,12 @@ def _laplace_noise(scale: float) -> float:
     Sample a single value from a Laplace(0, scale) distribution.
 
     Uses the inverse-CDF method so we avoid extra dependencies
-    (no numpy / scipy required).
+    (no numpy / scipy required):  X = -b · sign(u) · ln(1 - 2|u|),
+    with u ~ Uniform[-0.5, 0.5).
     """
-    u = random.uniform(-0.5, 0.5)
-    return -scale * (u / abs(u)) * (1 + abs(u)) if u != 0 else 0.0
+    u = random.random() - 0.5
+    # Guard the u = -0.5 endpoint, where ln(0) is undefined.
+    return -scale * math.copysign(1.0, u) * math.log(max(1 - 2 * abs(u), 1e-12))
 
 
 def sanitize_record(
