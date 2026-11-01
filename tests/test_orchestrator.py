@@ -220,5 +220,6 @@ def test_failing_agent_is_recorded_and_independent_steps_still_run(client, monke
 
 
 def test_unknown_user_records_no_run(client):
+    make_user(client)
     assert client.post("/api/run-cycle/9999").status_code == 404
     assert client.get("/api/runs/1").status_code == 404

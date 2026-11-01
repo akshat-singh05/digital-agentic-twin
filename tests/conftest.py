@@ -3,8 +3,12 @@ Shared pytest fixtures.
 
 The test database is a throwaway SQLite file built by the real Alembic
 migrations once per session; each test then starts from empty tables.
-DATABASE_URL must be set before any ``app`` import, because
-``app.database`` builds its engine at import time.
+DATABASE_URL (and the security settings) must be set before any ``app``
+import, because ``app.database`` and ``app.config`` read them at import time.
+
+Authentication: ``make_user`` registers through ``/api/auth/register`` and
+makes the client act as that user (``Authorization`` header); ``as_user``
+switches between users already created.  Rate limiting is off by default.
 """
 
 import os
@@ -14,10 +18,16 @@ import tempfile
 _TEST_DB = os.path.join(tempfile.mkdtemp(prefix="twin_test_"), "test.db")
 os.environ["DATABASE_URL"] = "sqlite:///" + _TEST_DB.replace("\\", "/")
 os.environ.setdefault("LOG_LEVEL", "WARNING")
+os.environ["SECRET_KEY"] = "test-secret-key-not-for-production"
+os.environ["RATE_LIMIT_PER_MINUTE"] = "0"
+os.environ["LOGIN_RATE_LIMIT_PER_MINUTE"] = "0"
+
+TEST_PASSWORD = "correct-horse-battery"
 
 import pytest
 from fastapi.testclient import TestClient
 
+from app.core import rate_limit
 from app.database import Base, engine
 from app.db_migrations import migrate_to_head
 from app.main import app
@@ -37,35 +47,49 @@ def fresh_db(migrated_db):
         for table in reversed(Base.metadata.sorted_tables):
             conn.execute(table.delete())
     random.seed(1234)
+    rate_limit.reset()
     yield
 
 
 @pytest.fixture
 def client():
     with TestClient(app) as c:
+        c.tokens = {}          # user_id → access token
         yield c
 
 
 # ─────────────────────────────────────────────────────────────
 # Data helpers
 # ─────────────────────────────────────────────────────────────
-def make_user(client, email="user@example.com", name="Test User", consents=True):
+def as_user(client, user_id):
+    """Make the client act as an already-created user."""
+    client.headers["Authorization"] = f"Bearer {client.tokens[user_id]}"
+    return user_id
+
+
+def make_user(client, email="user@example.com", name="Test User", consents=True, role="user"):
     """
-    Create a user.  ``consents=True`` grants every scope directly in the
-    DB (no audit entries); pass False, or a list of scopes, to test the
-    Privacy Mediator.
+    Register a user and act as them.  ``consents=True`` grants every scope
+    directly in the DB (no audit entries); pass False, or a list of scopes,
+    to test the Privacy Mediator.  ``role="admin"`` promotes the account.
     """
     from app.database import SessionLocal
-    from app.models import Consent
+    from app.models import Consent, User
     from app.modules.privacy_mediator.consent import CONSENT_SCOPES
 
-    res = client.post("/api/users", json={"name": name, "email": email})
+    res = client.post("/api/auth/register",
+                      json={"name": name, "email": email, "password": TEST_PASSWORD})
     assert res.status_code == 201, res.text
-    user_id = res.json()["data"]["id"]
+    data = res.json()["data"]
+    user_id = data["user"]["id"]
+    client.tokens[user_id] = data["access_token"]
+    as_user(client, user_id)
 
     scopes = list(CONSENT_SCOPES) if consents is True else (consents or [])
     with SessionLocal() as db:
         db.add_all(Consent(user_id=user_id, scope=s, granted=True) for s in scopes)
+        if role != "user":
+            db.get(User, user_id).role = role
         db.commit()
     return user_id
 

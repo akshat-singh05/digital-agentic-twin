@@ -11,35 +11,40 @@ import urllib.error
 import sys
 
 BASE = "http://127.0.0.1:8000/api"
+_token = None          # access token of the user the script is acting as
 
 
-def _post(path, body=None):
-    data = json.dumps(body).encode() if body else None
-    req = urllib.request.Request(
-        f"{BASE}{path}",
-        data=data,
-        headers={"Content-Type": "application/json"} if data else {},
-        method="POST",
-    )
+def _request(path, method, body=None):
+    headers = {"Content-Type": "application/json"}
+    if _token:
+        headers["Authorization"] = f"Bearer {_token}"
+    data = json.dumps(body).encode() if body is not None else (b"" if method != "GET" else None)
+    req = urllib.request.Request(f"{BASE}{path}", data=data, headers=headers, method=method)
     with urllib.request.urlopen(req) as resp:
         return resp.status, json.loads(resp.read().decode())
 
 
+def _post(path, body=None):
+    return _request(path, "POST", body)
+
+
 def _get(path):
-    with urllib.request.urlopen(f"{BASE}{path}") as resp:
-        return resp.status, json.loads(resp.read().decode())
+    return _request(path, "GET")
+
+
+def _register(name, email):
+    """Register a user, act as them, and return their id."""
+    global _token
+    code, res = _post("/auth/register", {"name": name, "email": email, "password": "smoke-test-pw"})
+    assert code == 201 and res["status"] == "success", f"Registration failed: {res}"
+    _token = res["data"]["access_token"]
+    return res["data"]["user"]["id"]
 
 
 def _grant_all_consents(uid):
     for scope in ("usage_analysis", "share_usage_with_provider",
                   "negotiate_on_behalf", "execute_plan_changes"):
-        req = urllib.request.Request(
-            f"{BASE}/users/{uid}/consents/{scope}",
-            data=json.dumps({"granted": True}).encode(),
-            headers={"Content-Type": "application/json"},
-            method="PUT",
-        )
-        urllib.request.urlopen(req).close()
+        _request(f"/users/{uid}/consents/{scope}", "PUT", {"granted": True})
 
 
 def main():
@@ -48,12 +53,10 @@ def main():
     print("  INTEGRATION TEST — Plan Switching + Audit Logger")
     print("=" * 60)
 
-    # 1. Create user
-    code, res = _post("/users", {"name": "Switch Tester", "email": f"switch_{ts}@test.com"})
-    assert code == 201 and res["status"] == "success", f"User creation failed: {res}"
-    uid = res["data"]["id"]
+    # 1. Register user (logs in as them)
+    uid = _register("Switch Tester", f"switch_{ts}@test.com")
     _grant_all_consents(uid)
-    print(f"✅ 1. Created user id={uid} and granted all consents")
+    print(f"✅ 1. Registered user id={uid} and granted all consents")
 
     # 2. Create subscription
     code, res = _post("/subscriptions", {
@@ -117,8 +120,7 @@ def main():
         print(f"       HTTP 409 — no optimization opportunity left")
 
     # === Edge case: user with no subscription ===
-    code3, res3 = _post("/users", {"name": "No Sub User", "email": f"nosub_{ts}@test.com"})
-    uid2 = res3["data"]["id"]
+    uid2 = _register("No Sub User", f"nosub_{ts}@test.com")
     _grant_all_consents(uid2)
     try:
         _post(f"/switch/{uid2}")
@@ -136,6 +138,15 @@ def main():
         print("❌ 10. Expected error for user with no negotiation!")
     except urllib.error.HTTPError as e:
         print(f"✅ 10. No-negotiation edge case → HTTP {e.code}")
+
+    # === Access control: user 2 cannot see user 1's audit trail ===
+    try:
+        _get(f"/audit/{uid}")
+        print("❌ 11. Another user's audit trail was readable!")
+        sys.exit(1)
+    except urllib.error.HTTPError as e:
+        assert e.code == 404, e.code
+        print(f"✅ 11. Other user's audit trail → HTTP {e.code} (hidden)")
 
     print("\n" + "=" * 60)
     print("  ALL TESTS PASSED ✅")

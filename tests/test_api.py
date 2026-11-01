@@ -8,13 +8,14 @@ from tests.conftest import add_usage, approve, get_subscription, make_subscripti
 
 # ── Error envelope & request limits ──────────────────────────
 def test_not_found_uses_standard_error_envelope(client):
+    make_user(client)
     res = client.get("/api/users/9999")
     assert res.status_code == 404
     assert res.json() == {"status": "error", "message": "User with id 9999 not found"}
 
 
 def test_validation_error_uses_standard_error_envelope(client):
-    res = client.post("/api/users", json={"name": ""})
+    res = client.post("/api/auth/register", json={"name": ""})
     assert res.status_code == 422
     body = res.json()
     assert body["status"] == "error"
@@ -29,15 +30,16 @@ def test_unknown_route_uses_standard_error_envelope(client):
 
 def test_duplicate_email_is_conflict(client):
     make_user(client)
-    res = client.post("/api/users", json={"name": "Again", "email": "user@example.com"})
+    res = client.post("/api/auth/register",
+                      json={"name": "Again", "email": "user@example.com", "password": "another-pass"})
     assert res.status_code == 409
     assert res.json()["status"] == "error"
 
 
 def test_pagination_limit_is_capped(client):
+    uid = make_user(client, role="admin")
     assert client.get("/api/users?limit=100000000").status_code == 422
     assert client.get("/api/users?skip=-1").status_code == 422
-    uid = make_user(client)
     assert client.get(f"/api/audit/{uid}?limit=100000000").status_code == 422
 
 

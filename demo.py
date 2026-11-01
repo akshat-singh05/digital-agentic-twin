@@ -5,14 +5,19 @@ Runs the complete intelligent pipeline for a user and prints every
 stage with clean, structured output.  No ANSI terminal color codes.
 
 Usage:
-    # Start server first:  uvicorn app.main:app --reload
-    # Then run:
-    python demo.py              # uses user_id=1
-    python demo.py 3            # uses user_id=3
-    python demo.py --seed       # seed fresh data, then demo user 1
+    # Seed and start the server first:
+    #   python seed_data.py --reset
+    #   uvicorn app.main:app --reload
+    python demo.py              # demo user 2 (has a plan-switch opportunity)
+    python demo.py 3            # demo user 3
+    python demo.py --seed       # seed fresh data, then demo user 2
+
+Logs in as the seeded demo user with DEMO_PASSWORD (default
+"demo-pass-2026"), so it only works against the seeded demo data.
 """
 
 import json
+import os
 import sys
 import urllib.request
 import urllib.error
@@ -20,23 +25,30 @@ import textwrap
 from datetime import datetime
 
 BASE_URL = "http://127.0.0.1:8000/api"
+_TOKEN = None
 
 
 # ═════════════════════════════════════════════════════════════
 #  HTTP helpers
 # ═════════════════════════════════════════════════════════════
-def _post(path):
-    """POST to the API and return parsed JSON."""
-    req = urllib.request.Request(f"{BASE_URL}{path}", data=b"", method="POST")
+def _request(path, method="GET", body=None):
+    data = json.dumps(body).encode() if body is not None else (b"" if method == "POST" else None)
+    req = urllib.request.Request(f"{BASE_URL}{path}", data=data, method=method)
     req.add_header("Content-Type", "application/json")
+    if _TOKEN:
+        req.add_header("Authorization", f"Bearer {_TOKEN}")
     with urllib.request.urlopen(req) as resp:
         return json.loads(resp.read().decode())
 
 
+def _post(path, body=None):
+    """POST to the API and return parsed JSON."""
+    return _request(path, "POST", body)
+
+
 def _get(path):
     """GET from the API and return parsed JSON."""
-    with urllib.request.urlopen(f"{BASE_URL}{path}") as resp:
-        return json.loads(resp.read().decode())
+    return _request(path)
 
 
 # ═════════════════════════════════════════════════════════════
@@ -183,8 +195,10 @@ def print_audit_logs(user_id):
 #  Main demo
 # ═════════════════════════════════════════════════════════════
 def main():
+    global _TOKEN
+
     # Parse args
-    user_id = 1
+    user_id = 2
     do_seed = False
 
     for arg in sys.argv[1:]:
@@ -214,13 +228,22 @@ def main():
         print(f"  Start the server first:  uvicorn app.main:app --reload")
         sys.exit(1)
 
-    # ── Verify user exists ───────────────────────────────────
+    # ── Log in as the seeded demo user ───────────────────────
+    from app.utils.seed_data import USERS
+    if not 1 <= user_id <= len(USERS):
+        print(f"\n  [ERROR] Demo users are 1–{len(USERS)}.")
+        sys.exit(1)
+    email = USERS[user_id - 1]["email"]
     try:
-        user_res = _get(f"/users/{user_id}")
-        user = user_res["data"]
-        print(f"\n  [OK] User found: {user['name']} ({user['email']})")
+        login = _post("/auth/login", {
+            "email": email, "password": os.getenv("DEMO_PASSWORD", "demo-pass-2026"),
+        })
+        _TOKEN = login["data"]["access_token"]
+        user = login["data"]["user"]
+        user_id = user["id"]
+        print(f"\n  [OK] Logged in as {user['name']} ({user['email']})")
     except urllib.error.HTTPError:
-        print(f"\n  [ERROR] User {user_id} not found!")
+        print(f"\n  [ERROR] Could not log in as {email}.")
         print(f"  Run: python seed_data.py --reset")
         sys.exit(1)
 

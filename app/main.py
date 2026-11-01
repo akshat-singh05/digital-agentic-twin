@@ -15,7 +15,8 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from app.config import APP_NAME, APP_VERSION
+from app.config import APP_NAME, APP_VERSION, CORS_ORIGINS, SECRET_KEY_IS_EPHEMERAL
+from app.core import rate_limit
 from app.core.logger import setup_logging, get_logger
 from app.db_migrations import migrate_to_head
 
@@ -39,6 +40,11 @@ async def lifespan(app: FastAPI):
     """Startup / shutdown lifecycle hook."""
     logger.info("Applying database migrations...")
     migrate_to_head()
+    if SECRET_KEY_IS_EPHEMERAL:
+        logger.warning(
+            "SECRET_KEY is not set — using a random key for this process; "
+            "access tokens stop working on restart. Set SECRET_KEY to keep them."
+        )
     logger.info(
         "%s v%s started successfully — ready to accept requests",
         APP_NAME, APP_VERSION,
@@ -60,13 +66,37 @@ app = FastAPI(
 )
 
 
-# ── CORS middleware (allows frontend to call API) ────────────
+# ── Rate limiting (per client IP; see app/core/rate_limit.py) ─
+@app.middleware("http")
+async def rate_limit_middleware(request: Request, call_next):
+    client_ip = request.client.host if request.client else "unknown"
+    retry_after = rate_limit.check(client_ip, request.url.path)
+    if retry_after:
+        return JSONResponse(
+            status_code=429,
+            content={"status": "error", "message": "Too many requests; slow down and retry later"},
+            headers={"Retry-After": str(retry_after)},
+        )
+    return await call_next(request)
+
+
+# ── Dashboard files: always revalidate, so an upgrade is never half-cached ──
+@app.middleware("http")
+async def no_stale_dashboard(request: Request, call_next):
+    response = await call_next(request)
+    path = request.url.path
+    if path == "/" or path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
+
+
+# ── CORS: only configured origins; tokens travel in a header, not cookies ──
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=CORS_ORIGINS,
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "PUT"],
+    allow_headers=["Authorization", "Content-Type"],
 )
 
 

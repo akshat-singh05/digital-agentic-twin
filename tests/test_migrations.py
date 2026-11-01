@@ -35,7 +35,7 @@ def test_migrations_build_exactly_the_model_schema(scratch_engine):
 def test_migrate_to_head_is_idempotent(scratch_engine):
     migrate_to_head(scratch_engine)
     migrate_to_head(scratch_engine)
-    assert _version(scratch_engine) == "0002"
+    assert _version(scratch_engine) == "0003"
 
 
 def test_downgrade_to_base_removes_every_table(scratch_engine):
@@ -69,7 +69,7 @@ def test_pre_migration_database_is_stamped_upgraded_and_backfilled(scratch_engin
 
     migrate_to_head(scratch_engine)
 
-    assert _version(scratch_engine) == "0002"
+    assert _version(scratch_engine) == "0003"
     with scratch_engine.connect() as conn:
         linked = dict(conn.execute(text("SELECT id, subscription_id FROM usage_data")).all())
         users = conn.execute(text("SELECT count(*) FROM users")).scalar()

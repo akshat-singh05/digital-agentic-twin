@@ -105,7 +105,9 @@ Generates deterministic, human-readable explanations for every decision the syst
 | **Database** | SQLite (swappable to PostgreSQL) |
 | **Validation** | Pydantic v2 |
 | **Server** | Uvicorn (ASGI) |
-| **Testing** | stdlib `urllib` (zero-dependency integration tests) |
+| **Migrations** | Alembic |
+| **Auth** | Bearer tokens (JWT via PyJWT), scrypt password hashing (stdlib) |
+| **Testing** | pytest + FastAPI TestClient; `test_integration.py` smoke script (stdlib `urllib`) |
 
 ---
 
@@ -180,13 +182,14 @@ Every module follows a strict **two-layer separation**:
 
 ## 🔌 API Endpoints
 
-All endpoints are prefixed with `/api`. Responses follow a uniform envelope:
+All endpoints are prefixed with `/api`. Every endpoint except register/login needs
+`Authorization: Bearer <token>` (in Swagger, use **Authorize**). Responses follow a uniform envelope:
 
 ```json
 // Success
 { "status": "success", "data": { ... } }
 
-// Error (403 consent missing, 404 not found, 409 state conflict, 422 validation — adds "errors")
+// Error (401 not signed in, 403 consent/admin, 404 not found, 409 conflict, 422 validation, 429 rate limit)
 { "status": "error", "message": "..." }
 ```
 
@@ -195,12 +198,25 @@ subscription. Negotiation and switching both run against it. When no subscriptio
 underutilized they are skipped (`"skipped"` in the response). A switch is only ever
 *proposed* for a price the provider **accepted**, never for a higher price at the same capacity.
 
+### Authentication & Access
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/api/auth/register` | Create an account (role `user`) and get a token |
+| `POST` | `/api/auth/login` | Email + password → token (rate limited) |
+| `GET` | `/api/auth/me` | The signed-in user |
+
+- **Users reach only their own data.** Another user's records answer 404, so they can't be probed.
+- **Admins can read** any user's data but **cannot act for them** — consents, preferences, usage,
+  agent runs and approvals are the owner's alone (403).
+- Passwords are stored as salted scrypt hashes; tokens expire after `ACCESS_TOKEN_MINUTES` (60).
+
 ### Core Data
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `POST` | `/api/users` | Register a new user |
-| `GET` | `/api/users` | List all users (paginated) |
+| `POST` | `/api/users` | Create an account (admin only; users sign up via `/auth/register`) |
+| `GET` | `/api/users` | List all users (admin only, paginated) |
 | `GET` | `/api/users/{user_id}` | Get a user by ID |
 | `POST` | `/api/subscriptions` | Create a subscription |
 | `GET` | `/api/subscriptions/user/{user_id}` | List user's subscriptions |
@@ -280,9 +296,13 @@ pip install -r requirements.txt
 python seed_data.py --reset
 ```
 
-This creates the demo plan catalog, 5 users with subscriptions and usage history, and full
-consent for the demo users. The data is generated from a fixed seed (`--random-seed`, default
-42), so every reset builds the same dataset.
+This creates the demo plan catalog, 5 users with subscriptions and usage history, full
+consent for the demo users, and a read-only admin. The data is generated from a fixed seed
+(`--random-seed`, default 42), so every reset builds the same dataset.
+
+**Demo sign-in** (local demos only): any seeded email such as `priya.patel@example.com`, or
+`admin@example.com`, with the password `demo-pass-2026` (override with `DEMO_PASSWORD` before seeding).
+A database from an older version keeps its users but they have no password; reseed to use the demo.
 
 ### 5. Start the server
 
@@ -290,7 +310,17 @@ consent for the demo users. The data is generated from a fixed seed (`--random-s
 uvicorn app.main:app --reload
 ```
 
-The API is now live at **http://127.0.0.1:8000**
+The dashboard and API are now live at **http://127.0.0.1:8000** — sign in with a demo account.
+
+| Setting | Default | Notes |
+|---------|---------|-------|
+| `SECRET_KEY` | random per process (DEBUG only) | **Required** when `DEBUG=false`; without it tokens stop working on restart |
+| `ACCESS_TOKEN_MINUTES` | `60` | Token lifetime |
+| `CORS_ORIGINS` | `http://127.0.0.1:8000,http://localhost:8000` | Other browser origins allowed to call the API |
+| `RATE_LIMIT_PER_MINUTE` | `120` | Per client IP; `0` disables |
+| `LOGIN_RATE_LIMIT_PER_MINUTE` | `10` | Login/register, per client IP |
+
+The rate limiter is in memory (per process); a multi-process deployment needs a shared store.
 
 ### 6. Explore the interactive docs
 
@@ -314,10 +344,22 @@ The suite uses a throwaway SQLite database and needs no running server.
 
 ## 📡 Example API Calls
 
+### Sign In
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email": "priya.patel@example.com", "password": "demo-pass-2026"}'
+```
+
+Copy `data.access_token` from the response and send it with every call below:
+`-H "Authorization: Bearer <token>"`. The examples omit that header for brevity, and act on
+your own user id (Priya is user 2 in the seeded data).
+
 ### Run the Full Pipeline (Single Click)
 
 ```bash
-curl -X POST http://127.0.0.1:8000/api/run-cycle/2   # seeded user 2
+curl -X POST http://127.0.0.1:8000/api/run-cycle/2 -H "Authorization: Bearer <token>"
 ```
 
 **Response** (abridged):
@@ -343,41 +385,44 @@ curl -X POST http://127.0.0.1:8000/api/run-cycle/2   # seeded user 2
 ### Analyze Usage
 
 ```bash
-curl -X POST http://127.0.0.1:8000/api/analyze/1
+curl -X POST http://127.0.0.1:8000/api/analyze/2
 ```
 
 ### Negotiate a Better Price
 
 ```bash
-curl -X POST http://127.0.0.1:8000/api/negotiate/1
+curl -X POST http://127.0.0.1:8000/api/negotiate/2
 ```
 
 ### Propose a Switch, then Decide
 
 ```bash
-curl -X POST http://127.0.0.1:8000/api/switch/1
+curl -X POST http://127.0.0.1:8000/api/switch/2
 curl -X POST http://127.0.0.1:8000/api/recommendations/2/approve   # or /reject
 ```
 
 ### Get Privacy-Sanitized Data
 
 ```bash
-curl -X POST http://127.0.0.1:8000/api/sanitize/1
+curl -X POST http://127.0.0.1:8000/api/sanitize/2
 ```
 
 ### View Audit Trail
 
 ```bash
-curl http://127.0.0.1:8000/api/audit/1
+curl http://127.0.0.1:8000/api/audit/2
 ```
 
-### Create a User
+### Register an Account
 
 ```bash
-curl -X POST http://127.0.0.1:8000/api/users \
+curl -X POST http://127.0.0.1:8000/api/auth/register \
   -H "Content-Type: application/json" \
-  -d '{"name": "John Doe", "email": "john@example.com", "phone": "+91-99999-00000"}'
+  -d '{"name": "John Doe", "email": "john@example.com", "password": "choose-a-long-one"}'
 ```
+
+New accounts start with every consent denied — grant them with
+`PUT /api/users/{id}/consents/{scope}` before running the agents.
 
 ### Create a Subscription
 
@@ -454,7 +499,7 @@ alembic revision --autogenerate -m "describe change"   # after editing app/model
 | **Stronger Privacy** | Implement ε-differential privacy with formal privacy budgets |
 | **Multi-User Scheduling** | Cron-based batch processing to run pipelines for all users periodically |
 | **PostgreSQL Migration** | Swap SQLite for PostgreSQL for production-scale deployments |
-| **Authentication** | Add JWT-based auth and role-based access control |
+| **Accounts** | Password reset, token refresh/revocation, and audit entries for sign-ins |
 | **WebSocket Notifications** | Real-time pipeline progress updates via WebSocket |
 | **Dashboard UI** | React/Next.js frontend with usage charts and audit timeline |
 | **Docker** | Containerize with Docker Compose for one-command deployment |

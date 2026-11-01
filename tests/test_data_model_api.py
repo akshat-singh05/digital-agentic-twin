@@ -19,6 +19,7 @@ def _add_plans(*plans):
 
 # ── Plan catalog ─────────────────────────────────────────────
 def test_catalog_lists_available_plans_cheapest_first(client):
+    make_user(client)
     _add_plans(("Jio", "Gold", 599, True), ("Jio", "Silver", 399, True),
                ("Jio", "Retired", 199, False), ("Airtel", "Smart", 299, True))
 

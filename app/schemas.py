@@ -75,14 +75,47 @@ class UserCreate(BaseModel):
 
 
 class UserOut(BaseModel):
-    """Public representation of a user."""
+    """Public representation of a user (never includes the password hash)."""
     id: int
     name: str
     email: str
     phone: Optional[str] = None
+    role: str = "user"
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+# ─────────────────────────────────────────────────────────────
+# Authentication Schemas
+# ─────────────────────────────────────────────────────────────
+class RegisterRequest(UserCreate):
+    """Create an account and receive an access token."""
+    password: str = Field(..., min_length=8, max_length=128, description="At least 8 characters")
+
+
+class AdminUserCreate(UserCreate):
+    """An administrator creating an account (password optional: no login until set)."""
+    password: Optional[str] = Field(None, min_length=8, max_length=128)
+
+
+class LoginRequest(BaseModel):
+    """Email + password login."""
+    email: str = Field(..., min_length=3, max_length=255)
+    password: str = Field(..., min_length=1, max_length=128)
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, v: str) -> str:
+        return v.strip().lower()
+
+
+class TokenOut(BaseModel):
+    """Access token for the ``Authorization: Bearer`` header."""
+    access_token: str
+    token_type: str = "bearer"
+    expires_in: int              # seconds
+    user: UserOut
 
 
 # ─────────────────────────────────────────────────────────────

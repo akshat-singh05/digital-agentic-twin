@@ -8,6 +8,8 @@ Generates:
   - 1–3 subscriptions per user, each linked to its catalog plan
   - 3–6 usage records per subscription (monthly billing periods)
   - consent for every scope (demo users only — real users start with none)
+  - login passwords for the demo users and an ``admin@example.com`` admin
+    (password from DEMO_PASSWORD, default "demo-pass-2026" — local demos only)
 
 Usage:
     python -m app.utils.seed_data          # from project root
@@ -30,6 +32,7 @@ if _PROJECT_ROOT not in sys.path:
 
 from sqlalchemy import text
 
+from app.core.passwords import hash_password
 from app.database import Base, engine, SessionLocal
 from app.db_migrations import migrate_to_head
 from app.models import Consent, PlanCatalog, User, Subscription, UsageData
@@ -39,6 +42,10 @@ from app.modules.privacy_mediator.consent import CONSENT_SCOPES
 # ═════════════════════════════════════════════════════════════
 #  DATA POOLS — curated for realistic, varied demo data
 # ═════════════════════════════════════════════════════════════
+
+# Shared demo password — for local demos only; set DEMO_PASSWORD to change it.
+DEMO_PASSWORD = os.getenv("DEMO_PASSWORD", "demo-pass-2026")
+ADMIN_EMAIL = "admin@example.com"
 
 USERS = [
     {"name": "Aarav Sharma",   "email": "aarav.sharma@example.com",   "phone": "+91-98765-43210"},
@@ -225,6 +232,8 @@ def seed(reset: bool = False, random_seed: int = 42):
         catalog_ids = _upsert_catalog(db)
         print(f"  📚  Catalog: {len(catalog_ids)} demo plans (source=demo_seed)")
 
+        password_hash = hash_password(DEMO_PASSWORD)
+
         profiles = list(USAGE_PROFILES.keys())
         total_subs = 0
         total_usage = 0
@@ -246,6 +255,7 @@ def seed(reset: bool = False, random_seed: int = 42):
                 name=user_data["name"],
                 email=email,
                 phone=user_data["phone"],
+                password_hash=password_hash,
             )
             db.add(user)
             db.flush()
@@ -300,6 +310,11 @@ def seed(reset: bool = False, random_seed: int = 42):
                     f"(₹{cost}/mo, {num_months} months, profile={profile})"
                 )
 
+        # Admin last, so demo users keep ids 1–5
+        if not db.query(User).filter(User.email == ADMIN_EMAIL).first():
+            db.add(User(name="Demo Admin", email=ADMIN_EMAIL, role="admin",
+                        password_hash=password_hash))
+
         db.commit()
 
         print(f"\n{'─'*60}")
@@ -308,6 +323,8 @@ def seed(reset: bool = False, random_seed: int = 42):
         print(f"      Users:         {len(USERS)}")
         print(f"      Subscriptions: {total_subs}")
         print(f"      Usage records: {total_usage}")
+        print(f"\n  🔑  Log in as any demo user, or {ADMIN_EMAIL} (read-only admin),")
+        print(f"      with the demo password (DEMO_PASSWORD, default 'demo-pass-2026').")
         print(f"{'='*60}\n")
 
     except Exception as e:

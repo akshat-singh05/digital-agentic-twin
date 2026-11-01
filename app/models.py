@@ -56,6 +56,10 @@ class User(Base):
     name       = Column(String(120), nullable=False)
     email      = Column(String(255), unique=True, nullable=False, index=True)
     phone      = Column(String(20), nullable=True)
+    # NULL for accounts created before authentication existed: they cannot
+    # log in until a password is set.
+    password_hash = Column(String(255), nullable=True)
+    role       = Column(String(20), nullable=False, default="user", server_default="user")  # user | admin
     created_at = Column(DateTime, default=_utcnow, nullable=False)
 
     # ── Relationships ────────────────────────────────────────

@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy.orm import Session
 
 from app.models import User, UserPreference
+from app.core.passwords import hash_password, verify_password
 from app.services.base_service import get_or_raise, get_or_none, save, transactional
 
 # Preference fields with their defaults (used when none are stored).
@@ -48,7 +49,9 @@ def require_user(db: Session, user_id: int) -> User:
 
 def create_user(db: Session, user_data: dict) -> User:
     """
-    Create and persist a new user.
+    Create and persist a new user (role "user").
+
+    A plain ``password`` in ``user_data`` is hashed; it is never stored.
 
     Raises:
         ValueError: If a user with the same email already exists.
@@ -57,7 +60,10 @@ def create_user(db: Session, user_data: dict) -> User:
     if existing:
         raise ValueError(f"Email '{user_data['email']}' is already registered")
 
-    user = User(**user_data)
+    user_data = dict(user_data)
+    password = user_data.pop("password", None)
+    user = User(**user_data, role="user",
+                password_hash=hash_password(password) if password else None)
     with transactional(db):
         save(db, user)
     return user
@@ -111,3 +117,19 @@ def replace_preferences(db: Session, user_id: int, prefs: Dict[str, Any]) -> Dic
     with transactional(db):
         save(db, row)
     return _preferences_out(user_id, row)
+
+
+# ─────────────────────────────────────────────────────────────
+# Authentication
+# ─────────────────────────────────────────────────────────────
+def authenticate(db: Session, email: str, password: str) -> Optional[User]:
+    """
+    The user with this email and password, or None.
+
+    Unknown email, wrong password and accounts without a password all
+    return None, so callers cannot tell them apart.
+    """
+    user = get_user_by_email(db, email.strip().lower())
+    if user is None or not verify_password(password, user.password_hash):
+        return None
+    return user

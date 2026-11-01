@@ -2,26 +2,47 @@
    Agentic Digital Twin — Dashboard Application
    ═══════════════════════════════════════════════════════════ */
 
-const API = 'http://127.0.0.1:8000/api';
+// Same origin as the dashboard (served by the API itself).
+const API = '/api';
+const TOKEN_KEY = 'twin.accessToken';
 
 // ── State ────────────────────────────────────────────────
 let currentPage  = 'dashboard';
 let selectedUser = null;
 let usersCache   = [];
+let currentUser  = null;
+
+// ── Session token (per browser tab; storage may be unavailable) ──
+function getToken() {
+  try { return sessionStorage.getItem(TOKEN_KEY); } catch { return null; }
+}
+function setToken(token) {
+  try {
+    if (token) sessionStorage.setItem(TOKEN_KEY, token);
+    else sessionStorage.removeItem(TOKEN_KEY);
+  } catch { /* storage blocked: the session lasts until reload */ }
+  memoryToken = token;
+}
+let memoryToken = null;
+function isAdmin() { return currentUser?.role === 'admin'; }
 
 // ═════════════════════════════════════════════════════════
 //  API HELPERS
 // ═════════════════════════════════════════════════════════
 async function api(path, method = 'GET', body = null) {
-  const opts = {
-    method,
-    headers: { 'Content-Type': 'application/json' },
-  };
+  const headers = { 'Content-Type': 'application/json' };
+  const token = getToken() || memoryToken;
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+  const opts = { method, headers };
   if (body) opts.body = JSON.stringify(body);
 
   const res  = await fetch(`${API}${path}`, opts);
   const json = await res.json();
 
+  if (res.status === 401 && !path.startsWith('/auth/')) {
+    setToken(null);
+    showLogin('Your session has ended — please sign in again.');
+  }
   if (!res.ok) {
     const msg = json?.message || json?.detail?.message || JSON.stringify(json?.detail) || 'Request failed';
     throw new Error(msg);
@@ -169,10 +190,15 @@ document.querySelectorAll('.nav-item').forEach(item => {
 // ═════════════════════════════════════════════════════════
 //  USER SELECTOR
 // ═════════════════════════════════════════════════════════
+// Admins may list every user; everyone else only sees themselves.
+async function listUsers() {
+  if (isAdmin()) return (await apiGet('/users')).data || [];
+  return currentUser ? [currentUser] : [];
+}
+
 async function loadUsers() {
   try {
-    const res = await apiGet('/users');
-    usersCache = res.data || [];
+    usersCache = await listUsers();
     const sel = $('globalUserSelect');
     sel.innerHTML = '<option value="">— Select User —</option>' +
       usersCache.map(u => `<option value="${u.id}">${esc(u.name)} (ID: ${u.id})</option>`).join('');
@@ -197,7 +223,7 @@ function onUserChange() {
 // ═════════════════════════════════════════════════════════
 async function checkServer() {
   try {
-    await fetch('http://127.0.0.1:8000/');
+    await fetch('/');
     $('serverDot').style.background = 'var(--success)';
     $('serverDot').style.boxShadow = '0 0 8px rgba(16,185,129,0.5)';
     $('serverLabel').textContent = 'Server Online';
@@ -235,8 +261,7 @@ function renderPage(page) {
 async function renderDashboard() {
   const body = $('contentBody');
   try {
-    const usersRes = await apiGet('/users');
-    const users = usersRes.data || [];
+    const users = await listUsers();
     let totalSubs = 0, activeSubs = 0;
 
     // Count subscriptions for all users
@@ -429,8 +454,7 @@ async function runFullCycle() {
 async function renderUsers() {
   const body = $('contentBody');
   try {
-    const res = await apiGet('/users');
-    const users = res.data || [];
+    const users = await listUsers();
 
     body.innerHTML = `
       <div class="page-section">
@@ -457,8 +481,8 @@ async function renderUsers() {
             </div>
           </div>
 
-          <!-- Add User Form -->
-          <div class="card">
+          <!-- Add User Form (admins only; users sign up on the login screen) -->
+          <div class="card" id="addUserCard">
             <div class="card-header"><h3>➕ Add New User</h3></div>
             <form onsubmit="addUser(event)">
               <div class="form-grid">
@@ -483,6 +507,7 @@ async function renderUsers() {
         </div>
       </div>
     `;
+    if (!isAdmin()) $('addUserCard')?.remove();
   } catch (e) {
     body.innerHTML = emptyState('⚠️', 'Failed to load users', e.message);
   }
@@ -1065,10 +1090,71 @@ async function renderAudit() {
 // ═════════════════════════════════════════════════════════
 //  INIT
 // ═════════════════════════════════════════════════════════
-(async function init() {
-  await checkServer();
+let registering = false;
+
+function showLogin(message = '') {
+  $('loginOverlay').hidden = false;
+  $('loginError').textContent = message;
+  $('btnLogout').hidden = true;
+  $('sessionUser').textContent = '';
+}
+
+function toggleRegister() {
+  registering = !registering;
+  $('loginNameGroup').hidden = !registering;
+  $('loginName').required = registering;
+  $('loginTitle').textContent = registering ? 'Create your account' : 'Sign in to your digital twin';
+  $('btnLogin').textContent = registering ? 'Create account' : 'Sign in';
+  $('loginPassword').autocomplete = registering ? 'new-password' : 'current-password';
+  $('loginSwitch').innerHTML = registering
+    ? 'Have an account? <a onclick="toggleRegister()">Sign in</a>'
+    : 'No account? <a onclick="toggleRegister()">Create one</a>';
+  $('loginError').textContent = '';
+}
+
+async function submitLogin(e) {
+  e.preventDefault();
+  const btn = $('btnLogin');
+  btn.disabled = true;
+  try {
+    const body = { email: $('loginEmail').value.trim(), password: $('loginPassword').value };
+    if (registering) body.name = $('loginName').value.trim();
+    const res = await apiPost(registering ? '/auth/register' : '/auth/login', body);
+    setToken(res.data.access_token);
+    $('loginPassword').value = '';
+    await startSession();
+  } catch (err) {
+    $('loginError').textContent = err.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function startSession() {
+  currentUser = (await apiGet('/auth/me')).data;
+  $('loginOverlay').hidden = true;
+  $('btnLogout').hidden = false;
+  $('sessionUser').textContent = `${currentUser.name}${isAdmin() ? ' (admin — read only for others)' : ''}`;
   await loadUsers();
   renderPage('dashboard');
+}
+
+function logout() {
+  setToken(null);
+  currentUser = null;
+  usersCache = [];
+  selectedUser = null;
+  $('contentBody').innerHTML = '';
+  showLogin();
+}
+
+(async function init() {
+  await checkServer();
+  if (getToken()) {
+    try { await startSession(); } catch { showLogin(); }
+  } else {
+    showLogin();
+  }
   // Recheck server every 30s
   setInterval(checkServer, 30000);
 })();

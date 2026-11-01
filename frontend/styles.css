@@ -1197,3 +1197,31 @@ tr:hover td {
     transform: rotate(90deg);
   }
 }
+
+/* ═══ LOGIN OVERLAY ═══ */
+.login-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: rgba(11, 14, 23, 0.92);
+}
+.login-overlay[hidden] { display: none; }
+.login-card {
+  width: 100%;
+  max-width: 380px;
+}
+.login-card h2 { color: var(--text-heading); margin-bottom: 4px; }
+.login-card p { color: var(--text-secondary); font-size: 0.88rem; margin-bottom: 18px; }
+.login-card .form-group { margin-bottom: 12px; }
+.login-card .btn { width: 100%; justify-content: center; }
+.login-switch { margin-top: 12px; text-align: center; font-size: 0.82rem; color: var(--text-secondary); }
+.login-switch a { color: var(--accent-secondary); cursor: pointer; }
+.login-error { margin-top: 12px; color: var(--danger); font-size: 0.82rem; min-height: 1em; }
+.session-user { color: var(--text-secondary); font-size: 0.82rem; margin-right: 8px; }
+
+/* The hidden attribute must win over component display rules (e.g. .btn). */
+[hidden] { display: none !important; }
