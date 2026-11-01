@@ -50,7 +50,8 @@ def test_readme_settings_table_matches_config():
 def test_readme_defaults_match_config_source():
     # The test run overrides the rate limits, so compare with the declared defaults.
     source = (_ROOT / "app" / "config.py").read_text(encoding="utf-8")
-    for name in ("ACCESS_TOKEN_MINUTES", "RATE_LIMIT_PER_MINUTE", "LOGIN_RATE_LIMIT_PER_MINUTE"):
+    for name in ("ACCESS_TOKEN_MINUTES", "RATE_LIMIT_PER_MINUTE", "LOGIN_RATE_LIMIT_PER_MINUTE",
+                 "REJECTION_COOLDOWN_DAYS"):
         default = re.search(rf'{name} = int\(os.getenv\("{name}", "(\d+)"\)\)', source).group(1)
         assert f"| `{name}` | `{default}` |" in _README, name
 

@@ -29,11 +29,12 @@ Integrates:
 """
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy.orm import Session
 
+from app import config
 from app.core.errors import ConflictError
 from app.core.run_context import current_run_id
 from app.models import NegotiationHistory, PlanCatalog, PlanHistory, Recommendation, Subscription
@@ -197,6 +198,31 @@ def get_alternatives(db: Session, subscription_id: int) -> Dict[str, Any]:
 # ─────────────────────────────────────────────────────────────
 # Public API — proposal
 # ─────────────────────────────────────────────────────────────
+def _recently_rejected(db: Session, subscription_id: int, option: Dict[str, Any]) -> Optional[Recommendation]:
+    """
+    A rejected recommendation, inside the cool-down, with exactly these terms.
+
+    A different plan or price is a new proposal and is never held back.
+    """
+    if config.REJECTION_COOLDOWN_DAYS <= 0:
+        return None
+    since = _now() - timedelta(days=config.REJECTION_COOLDOWN_DAYS)
+    plan_id = option["plan"]["plan_id"] if option["plan"] else None
+    return (
+        db.query(Recommendation)
+        .filter(
+            Recommendation.subscription_id == subscription_id,
+            Recommendation.status == "rejected",
+            Recommendation.decided_at >= since,
+            Recommendation.action == option["action"],
+            Recommendation.proposed_plan_id == plan_id,
+            Recommendation.proposed_cost == option["proposed_cost"],
+        )
+        .order_by(Recommendation.id.desc())
+        .first()
+    )
+
+
 def propose_plan_switch(
     db: Session, user_id: int, subscription_id: Optional[int] = None
 ) -> Dict[str, Any]:
@@ -312,6 +338,15 @@ def propose_plan_switch(
             notes.append("No comparable catalog plan.")
 
     chosen = max(options, key=lambda o: o["monthly_savings"]) if options else None
+    if chosen is not None:
+        repeat = _recently_rejected(db, subscription.id, chosen)
+        if repeat is not None:
+            notes.append(
+                f"Not proposed again: you rejected the same proposal (#{repeat.id}) on "
+                f"{repeat.decided_at:%Y-%m-%d}. It can be offered again after "
+                f"{config.REJECTION_COOLDOWN_DAYS} days, or sooner if the terms change."
+            )
+            chosen = None
     considered = [
         {"action": o["action"], "proposed_cost": o["proposed_cost"],
          "monthly_savings": o["monthly_savings"],

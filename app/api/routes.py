@@ -22,7 +22,7 @@ Response contract:
 
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 
 from app.config import ACCESS_TOKEN_MINUTES
@@ -64,7 +64,7 @@ from app.modules.plan_switching.service import (
     approve_recommendation, get_alternatives, propose_plan_switch, reject_recommendation,
     rollback_last_change,
 )
-from app.modules.audit_logger.service import get_user_audit_logs
+from app.modules.audit_logger.service import create_audit_log, get_user_audit_logs
 from app.orchestrator.pipeline import run_cycle as run_orchestrator_cycle
 
 logger = get_logger(__name__)
@@ -131,6 +131,18 @@ _Auth = Depends(get_current_user)
 # ═════════════════════════════════════════════════════════════
 #  AUTHENTICATION
 # ═════════════════════════════════════════════════════════════
+def _audit_sign_in(db: Session, user_id: int, outcome: str, request: Request) -> None:
+    """Record an account event; a failure to audit must never block signing in."""
+    try:
+        create_audit_log(db, user_id, "sign_in", {
+            "outcome": outcome,
+            "client_ip": request.client.host if request.client else None,
+        })
+    except Exception:
+        db.rollback()
+        logger.exception("Could not audit sign-in event for user %s", user_id)
+
+
 def _token_response(user: User) -> dict:
     return {
         "access_token": create_access_token(user.id),
@@ -146,12 +158,13 @@ def _token_response(user: User) -> dict:
     status_code=201,
     tags=["Authentication"],
 )
-def register(payload: RegisterRequest, db: Session = Depends(get_db)):
+def register(payload: RegisterRequest, request: Request, db: Session = Depends(get_db)):
     """Create an account (role "user") and return an access token.  409 if the email is taken."""
     try:
         user = user_service.create_user(db, payload.model_dump())
     except ValueError as e:
         raise HTTPException(status_code=409, detail={"status": "error", "message": str(e)})
+    _audit_sign_in(db, user.id, "registered", request)
     return {"status": "success", "data": _token_response(user)}
 
 
@@ -160,21 +173,26 @@ def register(payload: RegisterRequest, db: Session = Depends(get_db)):
     response_model=SuccessResponse[TokenOut],
     tags=["Authentication"],
 )
-def login(payload: LoginRequest, db: Session = Depends(get_db)):
+def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)):
     """
     Exchange email + password for an access token.
 
     Wrong email and wrong password give the same 401, so accounts cannot
-    be discovered.  Rate limited per client.
+    be discovered.  Rate limited per client.  Sign-ins, and failed attempts
+    against a real account, are written to that account's audit log.
     """
     user = user_service.authenticate(db, payload.email, payload.password)
     if user is None:
         logger.warning("Failed login for %s", payload.email)
+        known = user_service.get_user_by_email(db, payload.email.strip().lower())
+        if known is not None:
+            _audit_sign_in(db, known.id, "failed", request)
         raise HTTPException(
             status_code=401,
             detail={"status": "error", "message": "Invalid email or password"},
             headers={"WWW-Authenticate": "Bearer"},
         )
+    _audit_sign_in(db, user.id, "success", request)
     return {"status": "success", "data": _token_response(user)}
 
 

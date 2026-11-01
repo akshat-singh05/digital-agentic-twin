@@ -323,6 +323,7 @@ underutilized they are skipped (`"skipped"` in the response). A switch is only e
 - **Admins can read** any user's data but **cannot act for them** — consents, preferences, usage,
   agent runs and approvals are the owner's alone (403).
 - Passwords are stored as salted scrypt hashes; tokens expire after `ACCESS_TOKEN_MINUTES` (60).
+- Account creation, sign-ins, and failed sign-ins against a real account are written to that user's audit log (action `sign_in`); failures for unknown emails are not recorded.
 
 ### Core Data
 
@@ -433,6 +434,7 @@ The dashboard and API are now live at **http://127.0.0.1:8000** — sign in with
 | `CORS_ORIGINS` | `http://127.0.0.1:8000,http://localhost:8000` | Other browser origins allowed to call the API |
 | `RATE_LIMIT_PER_MINUTE` | `120` | Per client IP; `0` disables |
 | `LOGIN_RATE_LIMIT_PER_MINUTE` | `10` | Login/register, per client IP |
+| `REJECTION_COOLDOWN_DAYS` | `30` | A rejected proposal is not offered again with identical terms for this long (`0` disables) |
 
 The rate limiter is in memory (per process); a multi-process deployment needs a shared store.
 
@@ -638,7 +640,7 @@ alembic revision --autogenerate -m "describe change"   # after editing app/model
 - [ ] Do not seed demo data (it has a published password).
 - [ ] Back up the SQLite file (or move to a server database — see below) before upgrades; migrations run automatically at startup.
 - [ ] Decide whether open self-registration (`POST /api/auth/register`) is acceptable; it has no email verification.
-- [ ] Add a `LICENSE` file. The badge says MIT, but the repository does not contain one.
+- [ ] Check the `LICENSE` copyright line (it names the repository owner) before publishing.
 
 ### Known limitations
 
@@ -649,7 +651,7 @@ These are properties of the code as it stands, not planned behaviour.
 - The analyzer is rule-based. Its "savings" are computed from the stored records and the catalog; they are not forecasts of real bills.
 
 **Security and accounts**
-- No password reset, no token refresh or revocation (a token is valid until it expires), and sign-ins are not written to the audit log.
+- No password reset and no token refresh or revocation (a token is valid until it expires). Failed sign-ins for emails that have no account are logged by the server but not audited per user.
 - The dashboard keeps the token in `sessionStorage`, so it is exposed to any script running on the page.
 - Rate limiting is in memory and per process: it resets on restart and does not span several workers or instances. Behind a proxy it keys on the address Uvicorn reports, so configure forwarded headers correctly.
 
@@ -659,12 +661,12 @@ These are properties of the code as it stands, not planned behaviour.
 - SQLite allows one writer at a time; it suits a demo or a small single-node deployment.
 
 **Agents**
-- A proposal you reject can be proposed again on the next run (there is no cool-down).
+- After you reject a proposal, the same terms are held back for `REJECTION_COOLDOWN_DAYS`; a different plan or price is still proposed straight away.
 - *Agent Activity* shows a run's status as it was when the run finished.
 - Laplace noise uses fixed default scales (0.5 GB, 10 minutes) that the API does not expose, and no privacy budget (ε) is tracked.
 
 **Process**
-- There is no CI configuration in the repository; run `pytest` yourself.
+- CI (`.github/workflows/ci.yml`) runs `pytest` and a Docker build with a health check on every push, but it has not run yet: it only starts once the repository is on GitHub.
 - `test_integration.py` is a smoke script for a live server, not part of `pytest`.
 
 ---
@@ -679,10 +681,9 @@ These are properties of the code as it stands, not planned behaviour.
 | **Stronger Privacy** | Implement ε-differential privacy with formal privacy budgets |
 | **Multi-User Scheduling** | Cron-based batch processing to run pipelines for all users periodically |
 | **PostgreSQL** | Verify migrations and tests on PostgreSQL for multi-user deployments |
-| **Accounts** | Password reset, token refresh/revocation, and audit entries for sign-ins |
+| **Accounts** | Password reset and token refresh/revocation |
 | **WebSocket Notifications** | Real-time pipeline progress updates via WebSocket |
 | **Usage Charts** | Trend charts on the dashboard (data is already served by the API) |
-| **CI** | Run the test suite and a Docker build on every push |
 | **Shared rate limiting** | Redis-backed counters so limits hold across workers |
 
 ---

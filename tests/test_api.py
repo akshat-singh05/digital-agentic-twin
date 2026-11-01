@@ -184,7 +184,7 @@ def test_pipeline_writes_one_audit_entry_per_decision(client):
     data = client.post(f"/api/run-cycle/{uid}").json()["data"]
     logs = client.get(f"/api/audit/{uid}").json()["data"]
 
-    actions = sorted(log["action"] for log in logs)
+    actions = sorted(log["action"] for log in logs if log["action"] != "sign_in")
     assert actions == ["analysis", "negotiation", "switching"]
     assert sorted(data["audit_logged"]) == actions
     for log in logs:
@@ -201,5 +201,6 @@ def test_standalone_agent_calls_are_audited_once(client):
     client.post(f"/api/negotiate/{uid}")
     client.post(f"/api/switch/{uid}")
 
-    actions = sorted(log["action"] for log in client.get(f"/api/audit/{uid}").json()["data"])
+    actions = sorted(log["action"] for log in client.get(f"/api/audit/{uid}").json()["data"]
+                     if log["action"] != "sign_in")
     assert actions == ["analysis", "negotiation", "switching"]

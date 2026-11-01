@@ -43,6 +43,9 @@ CORS_ORIGINS = [
 RATE_LIMIT_PER_MINUTE = int(os.getenv("RATE_LIMIT_PER_MINUTE", "120"))
 LOGIN_RATE_LIMIT_PER_MINUTE = int(os.getenv("LOGIN_RATE_LIMIT_PER_MINUTE", "10"))
 
+# Days a rejected proposal is not offered again unchanged (0 disables).
+REJECTION_COOLDOWN_DAYS = int(os.getenv("REJECTION_COOLDOWN_DAYS", "30"))
+
 # ── Logging ──────────────────────────────────────────────────
 LOG_LEVEL = os.getenv("LOG_LEVEL", "DEBUG" if DEBUG else "INFO").upper()
 LOG_FORMAT = "%(asctime)s │ %(levelname)-8s │ %(name)-30s │ %(message)s"

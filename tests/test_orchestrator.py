@@ -38,7 +38,7 @@ def test_run_records_every_agent_step_and_tags_audit_entries(client, monkeypatch
     assert all(s["status"] == "completed" and s["duration_ms"] is not None for s in steps.values())
     assert steps["negotiation_agent"]["summary"]["simulated"] is True
 
-    logs = client.get(f"/api/audit/{uid}").json()["data"]
+    logs = [l for l in client.get(f"/api/audit/{uid}").json()["data"] if l["action"] != "sign_in"]
     assert logs and all(l["run_id"] == data["run_id"] for l in logs)
     assert client.get(f"/api/runs/user/{uid}").json()["data"][0]["id"] == data["run_id"]
 
@@ -51,7 +51,8 @@ def test_audit_entries_store_the_run_id(client, monkeypatch):
     run_id = client.post(f"/api/run-cycle/{uid}").json()["data"]["run_id"]
 
     with SessionLocal() as db:
-        run_ids = {a.run_id for a in db.query(AuditLog).filter(AuditLog.user_id == uid)}
+        run_ids = {a.run_id for a in db.query(AuditLog)
+                   .filter(AuditLog.user_id == uid, AuditLog.action != "sign_in")}
     assert run_ids == {run_id}
 
 

@@ -1312,6 +1312,16 @@ async function rollbackSubscription(subId) {
 // ═════════════════════════════════════════════════════════
 //  PRIVACY CENTER
 // ═════════════════════════════════════════════════════════
+function privacyEventTone(l) {
+  return l.action === 'access_denied' || (l.action === 'sign_in' && /failed/i.test(l.description)) ? 'danger' : 'info';
+}
+
+function privacyEventLabel(l) {
+  if (l.action === 'access_denied') return '⛔ access denied';
+  if (l.action === 'sign_in') return /failed/i.test(l.description) ? '⚠ failed sign-in' : '🔐 sign-in';
+  return '🔑 consent';
+}
+
 async function renderPrivacy() {
   const body = $('contentBody');
   if (!selectedUser) { body.innerHTML = emptyState('🔒', 'Select a User', 'Choose a user to manage privacy.'); return; }
@@ -1321,7 +1331,7 @@ async function renderPrivacy() {
       apiGet(`/users/${selectedUser}/preferences`).then(r => r.data),
       apiGet(`/audit/${selectedUser}?limit=200`).then(r => r.data || []),
     ]);
-    const events = logs.filter(l => l.action === 'consent' || l.action === 'access_denied').slice(0, 15);
+    const events = logs.filter(l => ['consent', 'access_denied', 'sign_in'].includes(l.action)).slice(0, 15);
     const disabled = canAct() ? '' : 'disabled';
 
     body.innerHTML = `
@@ -1371,11 +1381,11 @@ async function renderPrivacy() {
         </div>
         <div class="card" style="margin-top:20px">
           <div class="card-header"><h3>🕑 Privacy Activity</h3>${badge(events.length + ' recent', 'info')}</div>
-          ${events.length === 0 ? emptyState('🔒', 'No privacy events yet', 'Permission changes and blocked agent access appear here.') :
+          ${events.length === 0 ? emptyState('🔒', 'No privacy events yet', 'Permission changes, blocked agent access and sign-ins appear here.') :
             `<div class="audit-timeline">${events.map(l => `
               <div class="audit-entry">
                 <div class="audit-header">
-                  <span class="audit-action badge-${l.action === 'access_denied' ? 'danger' : 'info'}">${l.action === 'access_denied' ? '⛔ access denied' : '🔑 consent'}</span>
+                  <span class="audit-action badge-${privacyEventTone(l)}">${privacyEventLabel(l)}</span>
                   <span class="audit-time">${fmtDateTime(l.created_at)}</span>
                 </div>
                 <div class="audit-desc">${esc(l.description)}</div>

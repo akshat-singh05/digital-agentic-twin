@@ -28,6 +28,7 @@ _MODULE_MAP = {
     "switching": "plan_switching",
     "consent": "privacy_mediator",
     "access_denied": "privacy_mediator",
+    "sign_in": "authentication",
     "recommendation": "plan_switching",
     "rollback": "plan_switching",
 }

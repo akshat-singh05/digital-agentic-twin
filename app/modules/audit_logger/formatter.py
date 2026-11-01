@@ -174,6 +174,18 @@ def _format_access_denied(payload: Dict[str, Any]) -> str:
     return f"Access denied to {agent}: consent '{scope}' has not been granted."
 
 
+def _format_sign_in(payload: Dict[str, Any]) -> str:
+    """Explanation for an account event: sign-up, sign-in or a failed sign-in."""
+    outcome = _safe_get(payload, "outcome", "unknown")
+    if outcome == "registered":
+        return "Account created."
+    if outcome == "success":
+        return "Signed in."
+    if outcome == "failed":
+        return "Failed sign-in attempt: wrong password."
+    return f"Account event: {outcome}."
+
+
 def _format_recommendation(payload: Dict[str, Any]) -> str:
     """Explanation for a user decision on, or expiry of, a recommendation."""
     rec_id = _safe_get(payload, "recommendation_id", "?")
@@ -207,6 +219,7 @@ _FORMATTERS = {
     "switching": _format_switching,
     "consent": _format_consent,
     "access_denied": _format_access_denied,
+    "sign_in": _format_sign_in,
     "recommendation": _format_recommendation,
     "rollback": _format_rollback,
 }
