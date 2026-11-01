@@ -14,6 +14,7 @@ from app.core.logger import get_logger
 from app.models import Subscription, UsageData
 from app.services.user_service import require_user
 from app.modules.audit_logger.service import create_audit_log
+from app.modules.privacy_mediator.service import require_consent
 from app.modules.usage_analyzer.analyzer import (
     analyze_usage,
     pick_best_plan,
@@ -92,10 +93,12 @@ def analyze_user_usage(db: Session, user_id: int) -> Dict[str, Any]:
     one, otherwise the best-fit plan.
 
     Raises:
-        ValueError: If user not found.
+        ValueError:           If user not found.
+        ConsentRequiredError: If usage analysis has not been consented to.
     """
-    # Step 1 — Validate user
+    # Step 1 — Validate user and consent
     require_user(db, user_id)
+    require_consent(db, user_id, "usage_analysis", "usage_analyzer")
     logger.info("Analyzing usage for user_id=%d", user_id)
 
     # Step 2 — Get ALL active subscriptions

@@ -112,11 +112,19 @@ def _format_switching(payload: Dict[str, Any]) -> str:
     new_cost = _safe_get(payload, "proposed_cost", 0)
     reason = _safe_get(payload, "reason", "")
 
+    savings = round(prev_cost - new_cost, 2)
+    rec_id = _safe_get(payload, "recommendation_id", None)
+
     if applied:
-        savings = round(prev_cost - new_cost, 2)
+        approval = f" Approved by user (recommendation #{rec_id})." if payload.get("approved_by_user") else ""
         return (
             f"Switch applied: cost reduced ₹{prev_cost} → ₹{new_cost} "
-            f"(saving ₹{savings}/month), risk level {risk}."
+            f"(saving ₹{savings}/month), risk level {risk}.{approval}"
+        )
+    if payload.get("proposed"):
+        return (
+            f"Switch proposed: ₹{prev_cost} → ₹{new_cost} (saving ₹{savings}/month), "
+            f"risk level {risk}. Awaiting user approval (recommendation #{rec_id})."
         )
     if reason:
         return reason
@@ -143,6 +151,37 @@ def _format_consent(payload: Dict[str, Any]) -> str:
     return f"Consent {verb} for '{scope}'."
 
 
+def _format_access_denied(payload: Dict[str, Any]) -> str:
+    """Explanation for an agent blocked by the Privacy Mediator."""
+    agent = _safe_get(payload, "agent", "unknown agent")
+    scope = _safe_get(payload, "scope", "unknown")
+    return f"Access denied to {agent}: consent '{scope}' has not been granted."
+
+
+def _format_recommendation(payload: Dict[str, Any]) -> str:
+    """Explanation for a user decision on, or expiry of, a recommendation."""
+    rec_id = _safe_get(payload, "recommendation_id", "?")
+    status = _safe_get(payload, "status", "unknown")
+    if status == "rejected":
+        return f"Recommendation #{rec_id} rejected by user; no change made."
+    if status == "expired":
+        reason = _safe_get(payload, "reason", "it is no longer valid")
+        return f"Recommendation #{rec_id} expired unapplied: {reason}."
+    return f"Recommendation #{rec_id} is now {status}."
+
+
+def _format_rollback(payload: Dict[str, Any]) -> str:
+    """Explanation for a rolled-back plan change."""
+    provider = _safe_get(payload, "provider", "unknown")
+    plan_name = _safe_get(payload, "plan_name", "unknown")
+    prev_cost = _safe_get(payload, "previous_cost", 0)
+    restored = _safe_get(payload, "restored_cost", 0)
+    return (
+        f"Change rolled back on {provider} ({plan_name}): "
+        f"cost restored ₹{prev_cost} → ₹{restored}."
+    )
+
+
 # ─────────────────────────────────────────────────────────────
 # Public API
 # ─────────────────────────────────────────────────────────────
@@ -151,6 +190,9 @@ _FORMATTERS = {
     "negotiation": _format_negotiation,
     "switching": _format_switching,
     "consent": _format_consent,
+    "access_denied": _format_access_denied,
+    "recommendation": _format_recommendation,
+    "rollback": _format_rollback,
 }
 
 

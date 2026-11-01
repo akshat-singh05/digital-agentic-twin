@@ -119,12 +119,14 @@ def print_negotiation(data):
 def print_switching(data):
     """Print plan switching results."""
     section("MODULE 4", "PLAN SWITCHING")
-    applied = data.get("applied", False)
-    decision = "[APPLIED]" if applied else "[SKIPPED]"
+    proposed = data.get("proposed", False)
+    decision = (
+        f"[PROPOSED #{data.get('recommendation_id')} — awaiting approval]"
+        if proposed else "[NOT PROPOSED]"
+    )
     kv("Decision", decision)
     kv("Projected Cost", f"Rs.{data.get('projected_cost', 0)}")
     kv("Risk Level", data.get("risk_flag", "—").upper())
-    kv("Rollback Occurred", "Yes" if data.get("rollback") else "No")
     reason = data.get("reason", "")
     if reason:
         wrapped = textwrap.fill(reason, width=52, initial_indent="", subsequent_indent="        ")
@@ -248,14 +250,14 @@ def main():
     # ── Final summary ────────────────────────────────────────
     banner("DEMO SUMMARY")
     kv("Pipeline Status", status_label(final), indent=4)
-    kv("Modules Executed", "5 / 5" if final == "completed" else "partial", indent=4)
+    kv("Run ID", str(data.get("run_id", "—")), indent=4)
     kv("Audit Entries Logged", str(len(data.get("audit_logged", []))), indent=4)
     if data.get("analysis"):
         kv("Recommendation", data["analysis"].get("recommendation", "—").upper(), indent=4)
     if data.get("negotiation"):
         kv("Negotiated Savings", f"{data['negotiation'].get('savings_pct', 0)}%", indent=4)
     if data.get("switching"):
-        kv("Plan Switch Applied", "Yes" if data["switching"].get("applied") else "No", indent=4)
+        kv("Change Proposed", "Yes — approve or reject it" if data["switching"].get("proposed") else "No", indent=4)
 
     print(f"\n  {'─' * 56}")
     print(f"  Demo complete — Full automation demonstrated!")

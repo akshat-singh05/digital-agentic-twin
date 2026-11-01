@@ -20,15 +20,18 @@
 
 **Agentic Digital Twin** is an intelligent backend system that acts as a user's autonomous representative for managing subscriptions (Jio, Airtel, Netflix, AWS, etc.).
 
-It continuously monitors usage patterns, protects user privacy with differential privacy, negotiates better deals with providers, validates plan switches against KPIs and SLA risk, and maintains an explainable audit trail of every decision — all executable through a **single API call**.
+It analyzes usage patterns, protects user privacy (consent gates + differential privacy), negotiates prices against a **built-in provider simulator**, validates proposed changes against KPIs and SLA risk, and keeps an explainable audit trail of every decision. Consequential changes are **proposed, not applied**: the user approves or rejects each one.
+
+> **Simulation notice:** there are no real provider integrations. Negotiation outcomes come from a simulator and are labelled `simulated: true`; the plan catalog is demo data.
 
 ### 🎯 Key Highlights
 
-- **Fully autonomous pipeline** — one endpoint triggers the entire optimization cycle
+- **Orchestrated decision cycle** — one endpoint runs every agent; each run and step is recorded
+- **Human in the loop** — plan changes wait for the user's approval and can be rolled back
 - **Modular architecture** — every module has a clean separation of pure logic vs DB persistence
-- **Privacy-first** — raw data is never exposed; Laplace noise is applied before any external interaction
+- **Privacy-first** — every agent passes a consent gate; Laplace noise is applied before any data is shared
 - **Explainable AI** — every decision generates a human-readable, deterministic audit message
-- **Safe plan switching** — KPI validation + SLA risk assessment + atomic rollback on failure
+- **Safe plan switching** — KPI validation + SLA risk assessment + atomic apply and rollback
 
 ---
 
@@ -58,13 +61,13 @@ Simulates multi-round price negotiation between the user's digital twin and the 
 - Acceptance threshold: ≤ 3% gap between offers
 - Full round history persisted for transparency
 
-### 4. 🔄 Plan Switching with Rollback
-Validates and applies negotiated plan changes using KPI thresholds and SLA risk assessment.
+### 4. 🔄 Plan Switching with Approval and Rollback
+Validates negotiated deals using KPI thresholds and SLA risk, then **proposes** them as recommendations.
 
-- **Cost validation**: downgrade must save ≥ 5%
+- **Cost validation**: downgrade must save ≥ 5%; paying the same or more needs more capacity
 - **SLA risk**: low / medium / high based on data + call limit proximity
-- **Atomic transactions**: automatic rollback on failure
-- **Snapshot-based recovery**: previous plan state stored as JSON
+- **Approval**: a recommendation is applied only when the user approves it (needs `execute_plan_changes` consent); it expires if the plan changed in the meantime
+- **History & rollback**: every applied change is recorded in `plan_history` and can be rolled back
 
 ### 5. 📝 Explainable Audit Logger
 Generates deterministic, human-readable explanations for every decision the system makes.
@@ -74,13 +77,15 @@ Generates deterministic, human-readable explanations for every decision the syst
 - Paginated retrieval by user
 - Module attribution for traceability
 
-### 6. ⚡ Unified System Pipeline
-Single-click intelligent workflow that connects all 5 modules end-to-end.
+### 6. ⚡ Orchestrator
+`app/orchestrator/pipeline.py` runs one decision cycle per call.
 
-- Sequential execution: Analyze → Sanitize → Negotiate → Switch → Audit
-- Graceful failure handling — continues pipeline on partial failures
-- Final status: `completed` / `partial` / `failed`
-- Cross-module output passing
+- Order: Analyze → Sanitize → Negotiate → Propose; every agent audits its own decision
+- Privacy Mediator gate: a missing consent **skips** that agent (and the steps that need it) and is audited as `access_denied`
+- No repeat negotiation while a proposal for that subscription awaits a decision
+- Every run and step (status, timing, summary, error) is stored and served at `/api/runs/{run_id}`
+- A failing agent is rolled back and recorded; independent steps still run
+- Final status: `awaiting_approval` / `completed` / `partial` / `failed`
 
 ---
 
@@ -139,7 +144,11 @@ project/
 │   │   ├── base_service.py      # Reusable DB helpers (save, transactional)
 │   │   ├── user_service.py      # User CRUD
 │   │   ├── subscription_service.py  # Subscription + usage CRUD
-│   │   └── system_service.py    # Unified pipeline orchestrator
+│   │   ├── catalog_service.py   # Plan catalog reads
+│   │   ├── recommendation_service.py / run_service.py  # Proposal + run history reads
+│   │
+│   ├── orchestrator/
+│   │   └── pipeline.py          # Decision cycle, run + step recording
 │   │
 │   └── utils/
 │       └── seed_data.py         # Database seeding utility
@@ -171,14 +180,14 @@ All endpoints are prefixed with `/api`. Responses follow a uniform envelope:
 // Success
 { "status": "success", "data": { ... } }
 
-// Error (404 not found, 409 state conflict, 422 validation — which also adds "errors")
+// Error (403 consent missing, 404 not found, 409 state conflict, 422 validation — adds "errors")
 { "status": "error", "message": "..." }
 ```
 
 The pipeline acts on a single **optimization target**: the most underutilized active
 subscription. Negotiation and switching both run against it. When no subscription is
-underutilized they are skipped (`"skipped"` in the response). A switch applies only a
-price the provider **accepted**, and never a higher price for the same capacity.
+underutilized they are skipped (`"skipped"` in the response). A switch is only ever
+*proposed* for a price the provider **accepted**, never for a higher price at the same capacity.
 
 ### Core Data
 
@@ -199,16 +208,21 @@ price the provider **accepted**, and never a higher price for the same capacity.
 | `GET` | `/api/plans` | Plan catalog, cheapest first (`?provider=`, `?category=`) |
 
 > The seeded catalog is **demo data** (`source: "demo_seed"`), not live provider pricing.
-> Consents and preferences are stored now; the orchestrator starts enforcing them in the next phase.
+> Consents are enforced by every agent (default: denied). Preferences are stored but not yet used in scoring.
 
 ### Intelligent Modules
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `POST` | `/api/analyze/{user_id}` | Run usage analysis |
-| `POST` | `/api/sanitize/{user_id}` | Get sanitized (private) usage data |
-| `POST` | `/api/negotiate/{user_id}` | Run autonomous price negotiation |
-| `POST` | `/api/switch/{user_id}` | Attempt KPI-validated plan switch |
+| `POST` | `/api/analyze/{user_id}` | Run usage analysis (consent: `usage_analysis`) |
+| `POST` | `/api/sanitize/{user_id}` | Get sanitized (private) usage data (consent: `share_usage_with_provider`) |
+| `POST` | `/api/negotiate/{user_id}` | Simulated price negotiation (consents: all three above) |
+| `POST` | `/api/switch/{user_id}` | Evaluate the latest deal and **propose** a change (nothing is applied) |
+| `GET` | `/api/recommendations/user/{user_id}` | List proposals (`?status=proposed`) |
+| `GET` | `/api/recommendations/{id}` | One proposal with rationale and evidence |
+| `POST` | `/api/recommendations/{id}/approve` | Apply it (consent: `execute_plan_changes`) |
+| `POST` | `/api/recommendations/{id}/reject` | Reject it; nothing changes |
+| `POST` | `/api/subscriptions/{sub_id}/rollback` | Undo the last applied change (consent: `execute_plan_changes`) |
 | `GET` | `/api/audit/{user_id}` | Get explainable audit logs |
 | `GET` | `/api/audit/user/{user_id}` | Get audit logs (alternate) |
 | `GET` | `/api/negotiation/{sub_id}/history` | Get negotiation round history |
@@ -217,7 +231,9 @@ price the provider **accepted**, and never a higher price for the same capacity.
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `POST` | `/api/run-cycle/{user_id}` | **Execute full pipeline** (analyze → sanitize → negotiate → switch → audit) |
+| `POST` | `/api/run-cycle/{user_id}` | **Run one decision cycle** (analyze → sanitize → negotiate → propose) |
+| `GET` | `/api/runs/user/{user_id}` | A user's runs with their steps |
+| `GET` | `/api/runs/{run_id}` | One run: each agent's status, timing, summary, error |
 
 ---
 
@@ -295,37 +311,22 @@ The suite uses a throwaway SQLite database and needs no running server.
 curl -X POST http://127.0.0.1:8000/api/run-cycle/1
 ```
 
-**Response:**
+**Response** (abridged):
 ```json
 {
   "status": "success",
   "data": {
+    "run_id": 1,
     "user_id": 1,
-    "analysis": {
-      "efficiency": 0.33,
-      "recommendation": "downgrade",
-      "savings_estimate": 401.33,
-      "usage_category": "underutilized",
-      "confidence_score": 1.0
-    },
-    "sanitization": {
-      "sanitized_usage": [ ... ]
-    },
-    "negotiation": {
-      "final_price": 486.43,
-      "savings_pct": 8.29,
-      "total_rounds": 5,
-      "status": "accepted"
-    },
-    "switching": {
-      "applied": true,
-      "risk_flag": "low",
-      "projected_cost": 486.43,
-      "rollback": false
-    },
+    "analysis": { "recommendation": "downgrade", "efficiency": 0.27, "optimization_target": { "subscription_id": 2 } },
+    "sanitization": { "sanitized_usage": [] },
+    "negotiation": { "status": "accepted", "final_price": 667.27, "savings_pct": 16.49, "simulated": true },
+    "switching": { "proposed": true, "recommendation_id": 2, "risk_flag": "low", "projected_cost": 667.27 },
+    "recommendation": { "recommendation_id": 2, "current_cost": 799.0, "projected_cost": 667.27, "estimated_monthly_savings": 131.73 },
     "audit_logged": ["analysis", "negotiation", "switching"],
+    "skipped": null,
     "errors": null,
-    "final_status": "completed"
+    "final_status": "awaiting_approval"
   }
 }
 ```
@@ -342,10 +343,11 @@ curl -X POST http://127.0.0.1:8000/api/analyze/1
 curl -X POST http://127.0.0.1:8000/api/negotiate/1
 ```
 
-### Switch Plan
+### Propose a Switch, then Decide
 
 ```bash
 curl -X POST http://127.0.0.1:8000/api/switch/1
+curl -X POST http://127.0.0.1:8000/api/recommendations/2/approve   # or /reject
 ```
 
 ### Get Privacy-Sanitized Data
@@ -417,9 +419,7 @@ curl -X POST http://127.0.0.1:8000/api/usage \
 | `agent_runs`, `agent_run_steps` | Orchestrator runs and per-agent steps | `user_id`, `run_id` |
 | `recommendations` | Proposed actions and their approval status | `user_id`, `subscription_id`, `run_id`, `proposed_plan_id` |
 
-`agent_runs`, `agent_run_steps` and `recommendations` exist in the schema; the
-orchestrator starts writing them in the next phase. SQLite foreign keys are
-enforced, so deleting a user cascades to their data.
+SQLite foreign keys are enforced, so deleting a user cascades to their data.
 
 ### Migrations
 

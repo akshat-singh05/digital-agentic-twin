@@ -21,7 +21,7 @@ from app.services.user_service import require_user
 from app.services.base_service import save, transactional
 from app.modules.audit_logger.service import build_audit_log
 from app.modules.usage_analyzer.service import analyze_subscription, find_optimization_target
-from app.modules.privacy_mediator.service import get_sanitized_usage
+from app.modules.privacy_mediator.service import get_sanitized_usage, require_consent
 from app.modules.negotiation_agent.engine import negotiate
 
 
@@ -87,11 +87,14 @@ def run_negotiation(
         Dict with final_price, rounds, savings_pct, status, etc.
 
     Raises:
-        ValueError:    If user or subscription not found.
-        ConflictError: If there is nothing worth negotiating.
+        ValueError:           If user or subscription not found.
+        ConflictError:        If there is nothing worth negotiating.
+        ConsentRequiredError: If a required consent scope is missing.
     """
-    # Step 1 — Validate user
+    # Step 1 — Validate user and consent (sharing is checked by the mediator)
     require_user(db, user_id)
+    require_consent(db, user_id, "usage_analysis", "negotiation_agent")
+    require_consent(db, user_id, "negotiate_on_behalf", "negotiation_agent")
 
     # Step 2 — Target subscription and its own efficiency score
     analysis = _resolve_target(db, user_id, subscription_id)
@@ -120,6 +123,8 @@ def run_negotiation(
         "status": result["status"],
         "efficiency_used": efficiency,
         "sanitized_records_count": len(sanitized.get("sanitized_usage", [])),
+        # The counterparty is the built-in provider simulator, not a real provider.
+        "simulated": True,
         "rounds": result["rounds"],
     }
 

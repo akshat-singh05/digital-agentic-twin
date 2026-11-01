@@ -8,6 +8,7 @@ Conventions:
   - *Out     schemas → the inner 'data' payload
 """
 
+import json
 from datetime import datetime
 from typing import Any, Dict, Generic, List, Optional, TypeVar
 
@@ -226,6 +227,7 @@ class AuditLogOut(BaseModel):
     """Public representation of an audit log entry."""
     id: int
     user_id: int
+    run_id: Optional[int] = None
     action: str
     module: str
     description: str
@@ -329,3 +331,70 @@ class ConsentOut(BaseModel):
     description: str
     granted: bool
     updated_at: Optional[datetime] = None
+
+
+# ─────────────────────────────────────────────────────────────
+# Recommendations / Orchestrator runs
+# ─────────────────────────────────────────────────────────────
+def _parse_json_text(v):
+    """JSON text columns are returned to clients as parsed objects."""
+    if isinstance(v, str):
+        try:
+            return json.loads(v)
+        except ValueError:
+            return v
+    return v
+
+
+class RecommendationOut(BaseModel):
+    """An action the twin proposes, with why and on what evidence."""
+    id: int
+    user_id: int
+    subscription_id: int
+    run_id: Optional[int] = None
+    proposed_plan_id: Optional[int] = None
+    action: str
+    current_cost: float
+    proposed_cost: Optional[float] = None
+    estimated_monthly_savings: Optional[float] = None
+    rationale: str
+    evidence: Optional[Any] = None
+    requires_approval: bool
+    status: str
+    created_at: datetime
+    decided_at: Optional[datetime] = None
+    executed_at: Optional[datetime] = None
+
+    model_config = {"from_attributes": True}
+
+    parse_evidence = field_validator("evidence", mode="before")(_parse_json_text)
+
+
+class AgentRunStepOut(BaseModel):
+    """One agent's step within a run."""
+    id: int
+    agent: str
+    status: str
+    started_at: datetime
+    finished_at: Optional[datetime] = None
+    duration_ms: Optional[int] = None
+    summary: Optional[Any] = None
+    error: Optional[str] = None
+
+    model_config = {"from_attributes": True}
+
+    parse_summary = field_validator("summary", mode="before")(_parse_json_text)
+
+
+class AgentRunOut(BaseModel):
+    """One orchestrator run and its steps."""
+    id: int
+    user_id: int
+    trigger: str
+    status: str
+    started_at: datetime
+    finished_at: Optional[datetime] = None
+    error: Optional[str] = None
+    steps: List[AgentRunStepOut] = []
+
+    model_config = {"from_attributes": True}

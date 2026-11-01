@@ -16,7 +16,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
-from app.core.errors import ConflictError
+from app.core.errors import ConflictError, ConsentRequiredError
 from app.core.logger import get_logger
 
 logger = get_logger(__name__)
@@ -38,15 +38,21 @@ from app.schemas import (
     UserPreferenceOut,
     ConsentUpdate,
     ConsentOut,
+    RecommendationOut,
+    AgentRunOut,
 )
-from app.services import catalog_service, user_service, subscription_service
+from app.services import (
+    catalog_service, recommendation_service, run_service, subscription_service, user_service,
+)
 from app.modules.privacy_mediator.service import list_consents, set_consent
 from app.modules.usage_analyzer.service import analyze_user_usage
 from app.modules.privacy_mediator.service import get_sanitized_usage
 from app.modules.negotiation_agent.service import run_negotiation
-from app.modules.plan_switching.service import switch_plan
+from app.modules.plan_switching.service import (
+    approve_recommendation, propose_plan_switch, reject_recommendation, rollback_last_change,
+)
 from app.modules.audit_logger.service import get_user_audit_logs
-from app.services.system_service import run_full_cycle
+from app.orchestrator.pipeline import run_cycle as run_orchestrator_cycle
 
 router = APIRouter()
 
@@ -63,8 +69,13 @@ def _raise_not_found(e: ValueError):
 
 
 def _raise_for(e: ValueError):
-    """Convert a service ValueError into 409 (state conflict) or 404 (not found)."""
-    status_code = 409 if isinstance(e, ConflictError) else 404
+    """Convert a service ValueError into 403 (consent), 409 (state conflict) or 404."""
+    if isinstance(e, ConsentRequiredError):
+        status_code = 403
+    elif isinstance(e, ConflictError):
+        status_code = 409
+    else:
+        status_code = 404
     raise HTTPException(
         status_code=status_code,
         detail={"status": "error", "message": str(e)},
@@ -383,13 +394,14 @@ def analyze_usage(user_id: int, db: Session = Depends(get_db)):
     """
     Analyze a user's subscription usage.
 
-    Evaluates the latest active subscription against historical
-    usage data and returns an efficiency score with a recommendation.
+    Evaluates every active subscription against its usage history and
+    returns efficiency scores plus the optimization target.
+    Requires the ``usage_analysis`` consent (403 otherwise).
     """
     try:
         result = analyze_user_usage(db, user_id)
     except ValueError as e:
-        _raise_not_found(e)
+        _raise_for(e)
     return {"status": "success", "data": result}
 
 
@@ -407,11 +419,12 @@ def sanitize_usage(user_id: int, db: Session = Depends(get_db)):
 
     Applies Laplace noise to sensitive fields (data_used_gb,
     call_minutes_used) so raw values are never exposed directly.
+    Requires the ``share_usage_with_provider`` consent (403 otherwise).
     """
     try:
         result = get_sanitized_usage(db, user_id)
     except ValueError as e:
-        _raise_not_found(e)
+        _raise_for(e)
     return {"status": "success", "data": result}
 
 
@@ -425,12 +438,12 @@ def sanitize_usage(user_id: int, db: Session = Depends(get_db)):
 )
 def negotiate_for_user(user_id: int, db: Session = Depends(get_db)):
     """
-    Run an autonomous multi-round negotiation for a user.
+    Run a multi-round negotiation for the user's most underutilized plan.
 
-    Analyzes usage efficiency, sanitizes data via the privacy
-    mediator, then simulates offer–counteroffer rounds with
-    the service provider.  Results are persisted to the
-    negotiation_history table.
+    The counterparty is the built-in provider **simulator** (the response
+    carries ``simulated: true``).  Rounds are persisted to
+    negotiation_history.  Requires the ``usage_analysis``,
+    ``negotiate_on_behalf`` and ``share_usage_with_provider`` consents.
     """
     try:
         result = run_negotiation(db, user_id)
@@ -449,13 +462,104 @@ def negotiate_for_user(user_id: int, db: Session = Depends(get_db)):
 )
 def switch_user_plan(user_id: int, db: Session = Depends(get_db)):
     """
-    Switch the user's plan based on the latest negotiation result.
+    Propose a plan change based on the latest negotiation result.
 
-    Evaluates KPIs (cost reduction, SLA risk) and applies the plan
-    change within a transaction.  Rolls back automatically on failure.
+    Evaluates KPIs (cost reduction, added value, SLA risk).  If they pass,
+    a recommendation is created with status ``proposed`` — **nothing is
+    changed** until the user approves it via
+    ``POST /recommendations/{id}/approve``.  409 if a proposal for the
+    subscription is already awaiting a decision.
     """
     try:
-        result = switch_plan(db, user_id)
+        result = propose_plan_switch(db, user_id)
+    except ValueError as e:
+        _raise_for(e)
+    return {"status": "success", "data": result}
+
+
+@router.post(
+    "/subscriptions/{sub_id}/rollback",
+    response_model=SuccessResponse[dict],
+    tags=["Plan Switching"],
+)
+def rollback_subscription(sub_id: int, db: Session = Depends(get_db)):
+    """
+    Restore the subscription's terms from before its last applied change.
+    Requires the ``execute_plan_changes`` consent.
+    """
+    try:
+        result = rollback_last_change(db, sub_id)
+    except ValueError as e:
+        _raise_for(e)
+    return {"status": "success", "data": result}
+
+
+# ═════════════════════════════════════════════════════════════
+#  RECOMMENDATIONS (USER DECISIONS)
+# ═════════════════════════════════════════════════════════════
+@router.get(
+    "/recommendations/user/{user_id}",
+    response_model=SuccessResponse[List[RecommendationOut]],
+    tags=["Recommendations"],
+)
+def list_user_recommendations(
+    user_id: int,
+    status: Optional[str] = Query(None, max_length=20),
+    limit: int = _UserLimit,
+    db: Session = Depends(get_db),
+):
+    """List a user's recommendations, newest first (filter with ``?status=proposed``)."""
+    try:
+        user_service.require_user(db, user_id)
+    except ValueError as e:
+        _raise_not_found(e)
+    recs = recommendation_service.list_recommendations(db, user_id, status=status, limit=limit)
+    return {"status": "success", "data": recs}
+
+
+@router.get(
+    "/recommendations/{recommendation_id}",
+    response_model=SuccessResponse[RecommendationOut],
+    tags=["Recommendations"],
+)
+def get_recommendation(recommendation_id: int, db: Session = Depends(get_db)):
+    """Get one recommendation with its rationale and evidence."""
+    try:
+        rec = recommendation_service.require_recommendation(db, recommendation_id)
+    except ValueError as e:
+        _raise_not_found(e)
+    return {"status": "success", "data": rec}
+
+
+@router.post(
+    "/recommendations/{recommendation_id}/approve",
+    response_model=SuccessResponse[dict],
+    tags=["Recommendations"],
+)
+def approve(recommendation_id: int, db: Session = Depends(get_db)):
+    """
+    Approve a proposed recommendation and apply it.
+
+    403 without the ``execute_plan_changes`` consent (the proposal stays
+    open); 409 if it was already decided or the subscription changed
+    since it was proposed (it then expires).
+    """
+    try:
+        result = approve_recommendation(db, recommendation_id)
+    except ValueError as e:
+        _raise_for(e)
+    return {"status": "success", "data": result}
+
+
+@router.post(
+    "/recommendations/{recommendation_id}/reject",
+    response_model=SuccessResponse[dict],
+    tags=["Recommendations"],
+)
+def reject(recommendation_id: int, db: Session = Depends(get_db)):
+    """Reject a proposed recommendation; nothing changes."""
+    try:
+        result = reject_recommendation(db, recommendation_id)
     except ValueError as e:
         _raise_for(e)
     return {"status": "success", "data": result}
@@ -498,25 +602,46 @@ def list_audit_logs(
 )
 def run_cycle(user_id: int, db: Session = Depends(get_db)):
     """
-    Execute the full intelligent pipeline for a user.
+    Run one decision cycle for a user through the orchestrator.
 
-    Runs all modules in sequence:
-      1. Usage Analysis
-      2. Data Sanitization (Privacy Mediator)
-      3. Autonomous Negotiation
-      4. Plan Switching
-      5. Explainable Audit Logging
+      1. Usage Analysis  2. Data Sanitization (Privacy Mediator)
+      3. Negotiation (simulated provider)  4. Plan Switching proposal
 
-    Returns a unified summary with analysis, negotiation, switching
-    results and a final_status of completed / partial / failed.
+    Steps without the needed consent are skipped.  If a change is worth
+    making, the run ends ``awaiting_approval`` with a recommendation to
+    approve or reject; nothing is changed by the run itself.  Every run
+    and step is recorded (``GET /runs/{run_id}``).
     """
     try:
-        logger.info("Starting full pipeline for user_id=%d", user_id)
-        result = run_full_cycle(db, user_id)
-        logger.info(
-            "Pipeline completed for user_id=%d — status=%s",
-            user_id, result.get("final_status"),
-        )
+        result = run_orchestrator_cycle(db, user_id)
     except ValueError as e:
         _raise_not_found(e)
     return {"status": "success", "data": result}
+
+
+@router.get(
+    "/runs/user/{user_id}",
+    response_model=SuccessResponse[List[AgentRunOut]],
+    tags=["System Pipeline"],
+)
+def list_runs(user_id: int, limit: int = _UserLimit, db: Session = Depends(get_db)):
+    """List a user's orchestrator runs (with steps), newest first."""
+    try:
+        user_service.require_user(db, user_id)
+    except ValueError as e:
+        _raise_not_found(e)
+    return {"status": "success", "data": run_service.list_runs(db, user_id, limit=limit)}
+
+
+@router.get(
+    "/runs/{run_id}",
+    response_model=SuccessResponse[AgentRunOut],
+    tags=["System Pipeline"],
+)
+def get_run(run_id: int, db: Session = Depends(get_db)):
+    """One run with each agent step's status, timing, summary and error."""
+    try:
+        run = run_service.require_run(db, run_id)
+    except ValueError as e:
+        _raise_not_found(e)
+    return {"status": "success", "data": run}

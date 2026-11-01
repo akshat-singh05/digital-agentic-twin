@@ -45,41 +45,41 @@ _LOW_USAGE = {"avg_data_used_gb": 30.0, "avg_call_minutes": 100.0}
 def test_price_increase_without_added_capacity_is_rejected():
     proposed = dict(_CURRENT, monthly_cost=520.0)
     result = evaluate_switch(_CURRENT, proposed, _LOW_USAGE)
-    assert result["applied"] is False
+    assert result["approved"] is False
     assert "no additional capacity" in result["reason"]
 
 
 def test_same_price_same_plan_is_rejected():
     result = evaluate_switch(_CURRENT, dict(_CURRENT), _LOW_USAGE)
-    assert result["applied"] is False
+    assert result["approved"] is False
 
 
 def test_price_increase_with_more_capacity_is_allowed():
     proposed = dict(_CURRENT, monthly_cost=520.0, data_limit_gb=150.0)
-    assert evaluate_switch(_CURRENT, proposed, _LOW_USAGE)["applied"] is True
+    assert evaluate_switch(_CURRENT, proposed, _LOW_USAGE)["approved"] is True
 
 
 def test_unlimited_counts_as_more_capacity():
     proposed = dict(_CURRENT, monthly_cost=520.0, call_minutes_limit=None)
-    assert evaluate_switch(_CURRENT, proposed, _LOW_USAGE)["applied"] is True
+    assert evaluate_switch(_CURRENT, proposed, _LOW_USAGE)["approved"] is True
 
 
 def test_downgrade_meeting_threshold_is_approved():
     proposed = dict(_CURRENT, monthly_cost=450.0)
-    assert evaluate_switch(_CURRENT, proposed, _LOW_USAGE)["applied"] is True
+    assert evaluate_switch(_CURRENT, proposed, _LOW_USAGE)["approved"] is True
 
 
 def test_downgrade_below_threshold_is_rejected():
     proposed = dict(_CURRENT, monthly_cost=490.0)
     result = evaluate_switch(_CURRENT, proposed, _LOW_USAGE)
-    assert result["applied"] is False
+    assert result["approved"] is False
     assert "below the minimum threshold" in result["reason"]
 
 
 def test_high_sla_risk_is_rejected():
     proposed = dict(_CURRENT, monthly_cost=300.0, data_limit_gb=20.0)
     result = evaluate_switch(_CURRENT, proposed, _LOW_USAGE)
-    assert result["applied"] is False
+    assert result["approved"] is False
     assert result["risk_flag"] == "high"
 
 

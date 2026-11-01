@@ -125,7 +125,7 @@ def evaluate_switch(
 
     Returns:
         Dictionary with:
-            applied        – True if the switch is approved
+            approved       – True if the switch passes every KPI rule
             reason         – human-readable explanation
             projected_cost – expected monthly cost after switch
             risk_flag      – "low" / "medium" / "high"
@@ -154,7 +154,7 @@ def evaluate_switch(
     # Rule 1: High risk → reject immediately
     if risk_flag == "high":
         return {
-            "applied": False,
+            "approved": False,
             "reason": (
                 f"Switch rejected: high risk of SLA breach. "
                 f"Data risk={data_risk}, call risk={call_risk}. "
@@ -167,7 +167,7 @@ def evaluate_switch(
     # Rule 2: Downgrade must meet minimum savings threshold
     if downgrade and reduction_pct < MINIMUM_SAVINGS_PCT:
         return {
-            "applied": False,
+            "approved": False,
             "reason": (
                 f"Switch rejected: cost reduction of {reduction_pct}% "
                 f"is below the minimum threshold of {MINIMUM_SAVINGS_PCT}%. "
@@ -180,7 +180,7 @@ def evaluate_switch(
     # Rule 3: Paying the same or more is only worth it for more capacity
     if not downgrade and not _adds_capacity(current_plan, proposed_plan):
         return {
-            "applied": False,
+            "approved": False,
             "reason": (
                 f"Switch rejected: proposed cost ₹{proposed_cost} is not lower than "
                 f"the current ₹{current_cost} and the plan offers no additional capacity."
@@ -199,7 +199,7 @@ def evaluate_switch(
     )
 
     return {
-        "applied": True,
+        "approved": True,
         "reason": (
             f"Switch approved with {risk_flag} risk. {savings_msg}"
         ),

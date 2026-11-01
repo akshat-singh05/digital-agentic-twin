@@ -4,7 +4,7 @@ plan history, preferences, consents, and the demo seeder."""
 import app.modules.negotiation_agent.engine as engine
 from app.database import SessionLocal
 from app.models import Consent, PlanCatalog, Subscription, UsageData
-from tests.conftest import add_usage, make_subscription, make_user
+from tests.conftest import add_usage, approve, make_subscription, make_user
 
 
 def _add_plans(*plans):
@@ -99,12 +99,15 @@ def test_applied_switch_is_recorded_in_plan_history(client, monkeypatch):
     add_usage(client, uid, data_used_gb=20.0)
 
     client.post(f"/api/negotiate/{uid}")
-    client.post(f"/api/switch/{uid}")   # applied
-    client.post(f"/api/switch/{uid}")   # rejected: must not add history
+    rec_id = client.post(f"/api/switch/{uid}").json()["data"]["recommendation_id"]
+    assert client.get(f"/api/subscriptions/{sub}/history").json()["data"] == []  # proposal only
+    approve(client, rec_id)
+    client.post(f"/api/switch/{uid}")   # not proposed: must not add history
 
     history = client.get(f"/api/subscriptions/{sub}/history").json()["data"]
     assert len(history) == 1
     assert history[0]["change_type"] == "price_change"
+    assert history[0]["recommendation_id"] == rec_id
     assert (history[0]["previous_cost"], history[0]["new_cost"]) == (599.0, 539.1)
     assert client.get("/api/subscriptions/9999/history").status_code == 404
 
@@ -137,7 +140,7 @@ def test_preferences_are_validated(client):
 
 # ── Consents ─────────────────────────────────────────────────
 def test_consents_default_to_denied(client):
-    uid = make_user(client)
+    uid = make_user(client, consents=False)
     consents = client.get(f"/api/users/{uid}/consents").json()["data"]
     assert {c["scope"] for c in consents} == {
         "usage_analysis", "share_usage_with_provider",
@@ -147,7 +150,7 @@ def test_consents_default_to_denied(client):
 
 
 def test_consent_grant_and_revoke_are_audited(client):
-    uid = make_user(client)
+    uid = make_user(client, consents=False)
     url = f"/api/users/{uid}/consents/negotiate_on_behalf"
 
     assert client.put(url, json={"granted": True}).json()["data"]["granted"] is True

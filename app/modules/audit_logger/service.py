@@ -14,6 +14,7 @@ from typing import Any, Dict, List
 
 from sqlalchemy.orm import Session
 
+from app.core.run_context import current_run_id
 from app.models import AuditLog
 from app.services.user_service import require_user
 from app.services.base_service import save, transactional
@@ -26,6 +27,9 @@ _MODULE_MAP = {
     "negotiation": "negotiation_agent",
     "switching": "plan_switching",
     "consent": "privacy_mediator",
+    "access_denied": "privacy_mediator",
+    "recommendation": "plan_switching",
+    "rollback": "plan_switching",
 }
 
 
@@ -48,6 +52,7 @@ def build_audit_log(
 
     return AuditLog(
         user_id=user_id,
+        run_id=current_run_id.get(),
         action=action_type,
         module=_MODULE_MAP.get(action_type, action_type),
         description=format_audit_message(action_type, payload),

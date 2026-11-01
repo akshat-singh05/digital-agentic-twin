@@ -30,6 +30,18 @@ def _get(path):
         return resp.status, json.loads(resp.read().decode())
 
 
+def _grant_all_consents(uid):
+    for scope in ("usage_analysis", "share_usage_with_provider",
+                  "negotiate_on_behalf", "execute_plan_changes"):
+        req = urllib.request.Request(
+            f"{BASE}/users/{uid}/consents/{scope}",
+            data=json.dumps({"granted": True}).encode(),
+            headers={"Content-Type": "application/json"},
+            method="PUT",
+        )
+        urllib.request.urlopen(req).close()
+
+
 def main():
     ts = time.strftime("%Y%m%d%H%M%S")  # unique suffix to avoid email collisions
     print("=" * 60)
@@ -40,7 +52,8 @@ def main():
     code, res = _post("/users", {"name": "Switch Tester", "email": f"switch_{ts}@test.com"})
     assert code == 201 and res["status"] == "success", f"User creation failed: {res}"
     uid = res["data"]["id"]
-    print(f"✅ 1. Created user id={uid}")
+    _grant_all_consents(uid)
+    print(f"✅ 1. Created user id={uid} and granted all consents")
 
     # 2. Create subscription
     code, res = _post("/subscriptions", {
@@ -71,15 +84,18 @@ def main():
     neg = res["data"]
     print(f"✅ 5. Negotiation → status={neg['status']}, final_price={neg['final_price']}, rounds={neg['total_rounds']}")
 
-    # 6. Switch plan
+    # 6. Propose a switch, then approve it (nothing changes before approval)
     code, res = _post(f"/switch/{uid}")
     sw = res["data"]
     print(f"✅ 6. Switch Plan:")
-    print(f"       applied      = {sw['applied']}")
+    print(f"       proposed     = {sw['proposed']} (recommendation #{sw['recommendation_id']})")
     print(f"       reason       = {sw['reason']}")
     print(f"       projected_cost = {sw['projected_cost']}")
     print(f"       risk_flag    = {sw['risk_flag']}")
-    print(f"       rollback     = {sw['rollback']}")
+    if sw["proposed"]:
+        code, res = _post(f"/recommendations/{sw['recommendation_id']}/approve")
+        assert res["data"]["status"] == "executed", res
+        print(f"       approved     → status={res['data']['status']}")
 
     # 7. Audit logs
     code, res = _get(f"/audit/{uid}")
@@ -92,7 +108,8 @@ def main():
     code2, res2 = _post(f"/switch/{uid}")
     sw2 = res2["data"]
     print(f"\n✅ 8. Second switch (same negotiation):")
-    print(f"       applied={sw2['applied']}, risk={sw2['risk_flag']}")
+    assert sw2["proposed"] is False, sw2
+    print(f"       proposed={sw2['proposed']}, risk={sw2['risk_flag']}")
 
     # === Edge case: user with no subscription ===
     code3, res3 = _post("/users", {"name": "No Sub User", "email": f"nosub_{ts}@test.com"})

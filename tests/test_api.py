@@ -3,7 +3,7 @@
 import json
 
 import app.modules.negotiation_agent.engine as engine
-from tests.conftest import add_usage, get_subscription, make_subscription, make_user
+from tests.conftest import add_usage, approve, get_subscription, make_subscription, make_user
 
 
 # ── Error envelope & request limits ──────────────────────────
@@ -92,7 +92,7 @@ def test_switch_without_negotiation_is_conflict(client):
 
 
 # ── Switching applies only an agreed price ───────────────────
-def test_applied_switch_uses_the_accepted_price(client):
+def test_switch_only_proposes_and_approval_applies_the_accepted_price(client):
     uid = make_user(client)
     sub = make_subscription(client, uid)
     add_usage(client, uid, data_used_gb=20.0)
@@ -100,14 +100,15 @@ def test_applied_switch_uses_the_accepted_price(client):
     neg = client.post(f"/api/negotiate/{uid}").json()["data"]
     sw = client.post(f"/api/switch/{uid}").json()["data"]
 
-    if sw["applied"]:
+    # Proposing never changes the subscription.
+    assert get_subscription(client, sub)["monthly_cost"] == 599.0
+    if sw["proposed"]:
         assert neg["status"] == "accepted"
+        approve(client, sw["recommendation_id"])
         assert get_subscription(client, sub)["monthly_cost"] == neg["final_price"]
-    else:
-        assert get_subscription(client, sub)["monthly_cost"] == 599.0
 
 
-def test_switch_is_not_applied_when_negotiation_failed(client, monkeypatch):
+def test_switch_is_not_proposed_when_negotiation_failed(client, monkeypatch):
     monkeypatch.setattr(engine, "_is_accepted", lambda offer, counter: False)
     uid = make_user(client)
     sub = make_subscription(client, uid)
@@ -117,41 +118,55 @@ def test_switch_is_not_applied_when_negotiation_failed(client, monkeypatch):
     sw = client.post(f"/api/switch/{uid}").json()["data"]
 
     assert neg["status"] == "final"
-    assert sw["applied"] is False
+    assert sw["proposed"] is False and sw["recommendation_id"] is None
     assert "without agreement" in sw["reason"]
     assert get_subscription(client, sub)["monthly_cost"] == 599.0
 
 
-def test_same_negotiation_cannot_be_applied_twice(client, monkeypatch):
-    # Force a deal at a fixed 10% discount so the first switch definitely applies.
+def _forced_deal(monkeypatch):
+    """Make every negotiation end in a deal at exactly 10% off."""
     monkeypatch.setattr(engine, "_initial_offer", lambda cost, eff: round(cost * 0.9, 2))
     monkeypatch.setattr(engine, "_is_accepted", lambda offer, counter: True)
+
+
+def test_only_one_open_proposal_per_subscription(client, monkeypatch):
+    _forced_deal(monkeypatch)
+    uid = make_user(client)
+    make_subscription(client, uid)
+    add_usage(client, uid, data_used_gb=20.0)
+
+    client.post(f"/api/negotiate/{uid}")
+    assert client.post(f"/api/switch/{uid}").json()["data"]["proposed"] is True
+    assert client.post(f"/api/switch/{uid}").status_code == 409
+
+
+def test_same_negotiation_cannot_be_applied_twice(client, monkeypatch):
+    _forced_deal(monkeypatch)
     uid = make_user(client)
     sub = make_subscription(client, uid)
     add_usage(client, uid, data_used_gb=20.0)
 
     client.post(f"/api/negotiate/{uid}")
     first = client.post(f"/api/switch/{uid}").json()["data"]
+    approve(client, first["recommendation_id"])
     second = client.post(f"/api/switch/{uid}").json()["data"]
 
-    assert first["applied"] is True
-    assert second["applied"] is False
+    assert second["proposed"] is False
     assert get_subscription(client, sub)["monthly_cost"] == 539.1
 
 
-def test_rejected_switch_keeps_previous_snapshot(client, monkeypatch):
+def test_snapshot_is_written_only_when_a_change_is_applied(client, monkeypatch):
     from app.database import SessionLocal
     from app.models import Subscription
 
-    monkeypatch.setattr(engine, "_initial_offer", lambda cost, eff: round(cost * 0.9, 2))
-    monkeypatch.setattr(engine, "_is_accepted", lambda offer, counter: True)
+    _forced_deal(monkeypatch)
     uid = make_user(client)
     sub = make_subscription(client, uid)
     add_usage(client, uid, data_used_gb=20.0)
 
     client.post(f"/api/negotiate/{uid}")
-    client.post(f"/api/switch/{uid}")   # applied: snapshot holds the ₹599 plan
-    client.post(f"/api/switch/{uid}")   # rejected: snapshot must be untouched
+    approve(client, client.post(f"/api/switch/{uid}").json()["data"]["recommendation_id"])
+    client.post(f"/api/switch/{uid}")   # not proposed: snapshot must be untouched
 
     with SessionLocal() as db:
         snapshot = json.loads(db.get(Subscription, sub).previous_plan_snapshot)

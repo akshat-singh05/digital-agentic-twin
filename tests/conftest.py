@@ -49,10 +49,31 @@ def client():
 # ─────────────────────────────────────────────────────────────
 # Data helpers
 # ─────────────────────────────────────────────────────────────
-def make_user(client, email="user@example.com", name="Test User"):
+def make_user(client, email="user@example.com", name="Test User", consents=True):
+    """
+    Create a user.  ``consents=True`` grants every scope directly in the
+    DB (no audit entries); pass False, or a list of scopes, to test the
+    Privacy Mediator.
+    """
+    from app.database import SessionLocal
+    from app.models import Consent
+    from app.modules.privacy_mediator.consent import CONSENT_SCOPES
+
     res = client.post("/api/users", json={"name": name, "email": email})
     assert res.status_code == 201, res.text
-    return res.json()["data"]["id"]
+    user_id = res.json()["data"]["id"]
+
+    scopes = list(CONSENT_SCOPES) if consents is True else (consents or [])
+    with SessionLocal() as db:
+        db.add_all(Consent(user_id=user_id, scope=s, granted=True) for s in scopes)
+        db.commit()
+    return user_id
+
+
+def approve(client, recommendation_id):
+    res = client.post(f"/api/recommendations/{recommendation_id}/approve")
+    assert res.status_code == 200, res.text
+    return res.json()["data"]
 
 
 def make_subscription(client, user_id, provider="Jio", plan_name="Gold 599",

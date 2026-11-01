@@ -15,10 +15,11 @@ from typing import Any, Dict, List
 
 from sqlalchemy.orm import Session
 
+from app.core.errors import ConsentRequiredError
 from app.models import Consent, UsageData
 from app.services.base_service import save, transactional
 from app.services.user_service import require_user
-from app.modules.audit_logger.service import build_audit_log
+from app.modules.audit_logger.service import build_audit_log, create_audit_log
 from app.modules.privacy_mediator.consent import CONSENT_SCOPES, is_known_scope
 from app.modules.privacy_mediator.sanitizer import sanitize_records
 
@@ -41,8 +42,11 @@ def get_sanitized_usage(db: Session, user_id: int) -> Dict[str, Any]:
     """
     Fetch a user's usage records and return sanitized (noised) versions.
 
+    Sanitized data exists only to be shared outside the twin, so this
+    requires the ``share_usage_with_provider`` consent.
+
     Steps:
-        1. Validate user exists (raises ValueError if not).
+        1. Validate user exists and has consented to sharing.
         2. Fetch all usage records for the user.
         3. Convert ORM objects to plain dicts.
         4. Pass through the sanitizer (Laplace noise).
@@ -56,10 +60,12 @@ def get_sanitized_usage(db: Session, user_id: int) -> Dict[str, Any]:
         Dict with ``sanitized_usage`` list.
 
     Raises:
-        ValueError: If user not found.
+        ValueError:           If user not found.
+        ConsentRequiredError: If sharing has not been consented to.
     """
-    # Step 1 — Validate user
+    # Step 1 — Validate user and consent
     require_user(db, user_id)
+    require_consent(db, user_id, "share_usage_with_provider", "privacy_mediator")
 
     # Step 2 — Fetch usage records
     records = (
@@ -113,6 +119,20 @@ def has_consent(db: Session, user_id: int, scope: str) -> bool:
         .first()
     )
     return bool(row and row.granted)
+
+
+def require_consent(db: Session, user_id: int, scope: str, agent: str) -> None:
+    """
+    The single permission gate every agent calls before using user data
+    or acting for the user.  A denial is written to the audit log.
+
+    Raises:
+        ConsentRequiredError: If ``scope`` has not been granted.
+    """
+    if has_consent(db, user_id, scope):
+        return
+    create_audit_log(db, user_id, "access_denied", {"scope": scope, "agent": agent})
+    raise ConsentRequiredError(scope, agent)
 
 
 def set_consent(db: Session, user_id: int, scope: str, granted: bool) -> Dict[str, Any]:

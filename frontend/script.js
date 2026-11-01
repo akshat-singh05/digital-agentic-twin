@@ -88,6 +88,34 @@ function effClass(eff) {
   return 'high';
 }
 
+// Approve / reject controls for a proposed recommendation.
+function decisionPanel(recId, text) {
+  return `
+    <div class="result-message" id="decision-${recId}" style="border-color:var(--warning);background:var(--warning-bg)">
+      <span class="msg-icon">📝</span>
+      <div style="flex:1">
+        <div><strong>Recommendation #${recId} awaits your decision.</strong> ${esc(text)}</div>
+        <div style="margin-top:10px;display:flex;gap:8px">
+          <button class="btn btn-primary btn-sm" onclick="decideRecommendation(${recId}, 'approve')">✅ Approve &amp; apply</button>
+          <button class="btn btn-secondary btn-sm" onclick="decideRecommendation(${recId}, 'reject')">✖ Reject</button>
+        </div>
+      </div>
+    </div>`;
+}
+
+async function decideRecommendation(recId, decision) {
+  const panel = $(`decision-${recId}`);
+  try {
+    const res = await apiPost(`/recommendations/${recId}/${decision}`);
+    const status = res.data.status;
+    if (panel) panel.innerHTML = `<span class="msg-icon">${status === 'executed' ? '✅' : '✖'}</span>
+      Recommendation #${recId} ${status === 'executed' ? 'approved and applied' : esc(status)}.`;
+    toast('success', 'Decision recorded', `Recommendation #${recId}: ${status}`);
+  } catch (e) {
+    toast('error', 'Decision failed', e.message);
+  }
+}
+
 function requireUser() {
   if (!selectedUser) {
     toast('warning', 'Select a User', 'Please select a user from the dropdown first.');
@@ -331,9 +359,10 @@ async function runFullCycle() {
       });
     }
 
-    const statusBadge = status === 'completed' ? badge('Completed', 'success') :
-                        status === 'partial'   ? badge('Partial', 'warning') :
-                                                 badge('Failed', 'danger');
+    const statusBadge = status === 'completed'         ? badge('Completed', 'success') :
+                        status === 'awaiting_approval' ? badge('Awaiting approval', 'warning') :
+                        status === 'partial'           ? badge('Partial', 'warning') :
+                                                         badge('Failed', 'danger');
 
     $('cycleResult').innerHTML = `
       <div class="result-grid" style="margin-top:20px">
@@ -353,21 +382,24 @@ async function runFullCycle() {
         ${d.switching ? `
         <div class="result-card">
           <div class="result-title">🔄 Plan Switch</div>
-          <div class="result-value">${d.switching.applied ? '✅ Applied' : '⏹ Skipped'}</div>
-          <div class="result-sub">Risk: ${d.switching.risk_flag} · ₹${d.switching.projected_cost}</div>
+          <div class="result-value">${d.switching.proposed ? '📝 Proposed' : '⏹ Not proposed'}</div>
+          <div class="result-sub">Risk: ${esc(d.switching.risk_flag)} · ₹${d.switching.projected_cost}</div>
         </div>` : ''}
-        ${d.skipped?.negotiation ? `
+        ${Object.entries(d.skipped || {}).map(([step, reason]) => `
         <div class="result-card">
-          <div class="result-title">🤝 Negotiation &amp; Switch</div>
-          <div class="result-value">⏭ Skipped</div>
-          <div class="result-sub">${esc(d.skipped.negotiation)}</div>
-        </div>` : ''}
+          <div class="result-title">⏭ ${esc(step)}</div>
+          <div class="result-value">Skipped</div>
+          <div class="result-sub">${esc(reason)}</div>
+        </div>`).join('')}
         <div class="result-card">
           <div class="result-title">📋 Pipeline Status</div>
           <div class="result-value">${statusBadge}</div>
           <div class="result-sub">${(d.audit_logged || []).length} audit entries logged</div>
         </div>
       </div>
+      ${d.recommendation ? decisionPanel(d.recommendation.recommendation_id,
+          `Proposed: ₹${d.recommendation.current_cost} → ₹${d.recommendation.projected_cost} ` +
+          `(save ₹${d.recommendation.estimated_monthly_savings}/month). Negotiated with the built-in provider simulator.`) : ''}
       ${d.errors ? `<div class="result-message" style="border-color:var(--warning);background:var(--warning-bg)"><span class="msg-icon">⚠️</span>${d.errors.map(esc).join('<br>')}</div>` : ''}
     `;
 
@@ -898,11 +930,12 @@ async function renderSwitching() {
         <div class="card-header">
           <h3>🔄 Plan Switching</h3>
           <button class="btn btn-primary" onclick="runSwitch()" id="btnSwitch" ${!selectedUser ? 'disabled' : ''}>
-            🔄 Switch Plan for User ${selectedUser || '—'}
+            🔄 Evaluate Switch for User ${selectedUser || '—'}
           </button>
         </div>
         <p style="color:var(--text-secondary);font-size:0.88rem;margin-bottom:16px">
-          Validates KPIs (cost reduction, SLA risk) and applies plan changes atomically with rollback support.
+          Validates KPIs (cost reduction, added value, SLA risk) and proposes a change.
+          Nothing is applied until you approve it.
         </p>
         <div id="switchResult">
           ${!selectedUser ? emptyState('🔄', 'Select a User', 'Choose a user to attempt plan switch.') : emptyState('🔄', 'Ready', 'Run a negotiation first, then click switch.')}
@@ -916,8 +949,8 @@ async function runSwitch() {
   if (!requireUser()) return;
   const btn = $('btnSwitch');
   btn.disabled = true;
-  btn.innerHTML = '<span class="spinner"></span> Switching...';
-  $('switchResult').innerHTML = loading('Evaluating KPIs and applying plan change...');
+  btn.innerHTML = '<span class="spinner"></span> Evaluating...';
+  $('switchResult').innerHTML = loading('Evaluating KPIs...');
 
   try {
     const res = await apiPost(`/switch/${selectedUser}`);
@@ -930,34 +963,30 @@ async function runSwitch() {
       <div class="result-grid">
         <div class="result-card">
           <div class="result-title">Decision</div>
-          <div class="result-value">${d.applied ? '✅ Applied' : '⏹ Rejected'}</div>
+          <div class="result-value">${d.proposed ? '📝 Proposed' : '⏹ Not proposed'}</div>
           <div class="result-sub">${esc(d.provider)} — ${esc(d.plan_name)}</div>
         </div>
         <div class="result-card">
           <div class="result-title">Projected Cost</div>
           <div class="result-value" style="color:var(--success)">₹${d.projected_cost}</div>
-          <div class="result-sub">After switch</div>
+          <div class="result-sub">Currently ₹${d.current_cost}</div>
         </div>
         <div class="result-card">
           <div class="result-title">Risk Level</div>
-          <div class="result-value" style="color:${riskColor}">${(d.risk_flag || '—').toUpperCase()}</div>
+          <div class="result-value" style="color:${riskColor}">${esc((d.risk_flag || '—').toUpperCase())}</div>
           <div class="result-sub">SLA risk assessment</div>
-        </div>
-        <div class="result-card">
-          <div class="result-title">Rollback</div>
-          <div class="result-value">${d.rollback ? '🔙 Yes' : '✅ No'}</div>
-          <div class="result-sub">${d.rollback ? 'Changes were rolled back' : 'No rollback needed'}</div>
         </div>
       </div>
       ${d.reason ? `<div class="result-message"><span class="msg-icon">💬</span>${esc(d.reason)}</div>` : ''}
+      ${d.proposed ? decisionPanel(d.recommendation_id, `Save ₹${d.estimated_monthly_savings}/month if approved.`) : ''}
     `;
-    toast(d.applied ? 'success' : 'info', 'Plan Switch Complete', d.applied ? 'Plan successfully changed!' : 'Switch was rejected.');
+    toast('info', 'Evaluation Complete', d.proposed ? 'Change proposed — awaiting your approval.' : 'No change proposed.');
   } catch (e) {
     $('switchResult').innerHTML = `<div class="result-message" style="border-color:var(--danger);background:var(--danger-bg)"><span class="msg-icon">❌</span>${esc(e.message)}</div>`;
     toast('error', 'Switch Failed', e.message);
   } finally {
     btn.disabled = false;
-    btn.innerHTML = `🔄 Switch Plan for User ${selectedUser}`;
+    btn.innerHTML = `🔄 Evaluate Switch for User ${selectedUser}`;
   }
 }
 
