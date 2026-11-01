@@ -13,11 +13,13 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy import text
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.config import APP_NAME, APP_VERSION, CORS_ORIGINS, SECRET_KEY_IS_EPHEMERAL
 from app.core import rate_limit
 from app.core.logger import setup_logging, get_logger
+from app.database import engine
 from app.db_migrations import migrate_to_head
 
 # Configure logging FIRST — before any module-level getLogger() calls propagate
@@ -165,6 +167,19 @@ def root():
         "message": "Agentic Digital Twin API Running",
         "version": APP_VERSION,
     }
+
+
+# ── Health check (unauthenticated; for load balancers and containers) ──
+@app.get("/health", tags=["System"])
+def health():
+    """200 when the app can reach its database, 503 otherwise."""
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+    except Exception:
+        logger.exception("Health check: database unreachable")
+        return JSONResponse(status_code=503, content={"status": "error", "message": "database unavailable"})
+    return {"status": "success", "version": APP_VERSION}
 
 
 # ── Register API routes ─────────────────────────────────────

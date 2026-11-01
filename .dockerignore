@@ -1,0 +1,16 @@
+.git
+.github
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.db
+*.sqlite3
+.env
+.env.*
+tests/
+test_integration.py
+demo.py
+requirements-dev.txt
+*.md

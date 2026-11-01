@@ -7,10 +7,10 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/python-3.10%2B-blue?logo=python&logoColor=white" alt="Python">
-  <img src="https://img.shields.io/badge/FastAPI-0.100%2B-009688?logo=fastapi&logoColor=white" alt="FastAPI">
+  <img src="https://img.shields.io/badge/python-3.12-blue?logo=python&logoColor=white" alt="Python">
+  <img src="https://img.shields.io/badge/FastAPI-0.162-009688?logo=fastapi&logoColor=white" alt="FastAPI">
   <img src="https://img.shields.io/badge/SQLite-3-003B57?logo=sqlite&logoColor=white" alt="SQLite">
-  <img src="https://img.shields.io/badge/SQLAlchemy-2.0-red?logo=sqlalchemy" alt="SQLAlchemy">
+  <img src="https://img.shields.io/badge/SQLAlchemy-2.1-red?logo=sqlalchemy" alt="SQLAlchemy">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
 </p>
 
@@ -105,14 +105,112 @@ Vanilla-JS dashboard served at `/` (sign in first). Every panel reads a real API
 
 ---
 
+## 🏗 Architecture
+
+### Components
+
+```mermaid
+flowchart LR
+    UI["Dashboard<br/>(vanilla JS, /)"] -->|"Bearer token"| API["FastAPI routes<br/>/api/*"]
+    API --> SEC["Auth + access rules<br/>core/security.py"]
+    API --> SVC["Services<br/>(CRUD + reads)"]
+    API --> ORCH["Orchestrator<br/>run_cycle"]
+    API --> AG
+    ORCH --> AG
+
+    subgraph AG["Agents (service.py = DB, pure logic = no DB)"]
+        direction TB
+        PM["Privacy Mediator<br/>consent gate + Laplace noise"]
+        UA["Usage Analyzer"]
+        NA["Negotiation Agent<br/>(simulated provider)"]
+        PS["Plan Switching<br/>proposals, approval, rollback"]
+        AL["Audit Logger"]
+    end
+
+    AG --> DB[("SQLite<br/>12 tables, Alembic")]
+    SVC --> DB
+    AG -. "every agent calls require_consent first" .-> PM
+    AG -. "every decision" .-> AL
+```
+
+### One decision cycle (`POST /api/run-cycle/{user_id}`)
+
+```mermaid
+sequenceDiagram
+    actor U as User
+    participant R as Route
+    participant O as Orchestrator
+    participant PM as Privacy Mediator
+    participant A as Agents
+    participant DB as Database
+
+    U->>R: POST /api/run-cycle/2 (Bearer token)
+    R->>R: authenticate, owner only
+    R->>O: run_cycle(user_id)
+    O->>DB: create agent_run
+    loop Analyze, Sanitize, Negotiate, Propose
+        O->>PM: require_consent(scope, agent)
+        alt consent missing
+            PM->>DB: audit access_denied
+            O->>DB: step = skipped (reason)
+        else granted
+            O->>A: run the agent
+            A->>DB: result + audit log (tagged with run_id)
+            O->>DB: step = completed / failed (timing, summary, error)
+        end
+    end
+    O->>DB: run.status = awaiting_approval, completed, partial or failed
+    O-->>U: results, skipped, errors, recommendation (status proposed)
+    Note over O,DB: Nothing about the subscription has changed yet
+```
+
+A failing agent is rolled back and recorded; the steps that do not depend on it still run.
+
+### Approval and rollback
+
+```mermaid
+sequenceDiagram
+    actor U as User
+    participant R as Route
+    participant PS as Plan Switching
+    participant PM as Privacy Mediator
+    participant DB as Database
+
+    U->>R: POST /api/recommendations/{id}/approve
+    R->>PS: approve_recommendation
+    PS->>PS: still proposed? (else 409)
+    PS->>PM: require_consent(execute_plan_changes)
+    Note over PS,PM: denied → 403, stays proposed
+    PS->>PS: plan and catalog price unchanged?
+    Note over PS,DB: changed → status expired, 409, nothing applied
+    PS->>DB: one transaction: update subscription, add plan_history, mark executed, audit
+    PS-->>U: applied
+    U->>R: POST /api/subscriptions/{id}/rollback
+    R->>PS: rollback_last_change (restores the terms stored in plan_history)
+```
+
+### What is real, simulated, and planned
+
+| Capability | Status | Notes |
+|---|---|---|
+| Usage analysis | **Real, rule-based** | Computed from stored usage records. No machine learning. |
+| Consent gate, audit trail, approvals, rollback | **Real** | Enforced in the service layer; every agent passes the gate. |
+| Differential privacy | **Real, basic** | Laplace noise per call. There is no privacy-budget accounting. |
+| Plan catalog | **Demo data** | Seeded, `source: "demo_seed"`; not live provider pricing. |
+| Provider negotiation | **Simulated** | A seeded simulator, labelled `simulated: true`. No provider is contacted. |
+| Applying a plan change | **Updates the twin's own records only** | Approval changes the subscription row in this database; nothing is sent to a provider. |
+| Real provider APIs, ML analysis, RL negotiation | **Planned** | See *Future Enhancements*. |
+
+---
+
 ## 🛠 Tech Stack
 
 | Layer | Technology |
 |-------|-----------|
-| **Language** | Python 3.10+ |
+| **Language** | Python 3.12 (the version the tests were run on) |
 | **Web Framework** | FastAPI |
-| **ORM** | SQLAlchemy 2.0 |
-| **Database** | SQLite (swappable to PostgreSQL) |
+| **ORM** | SQLAlchemy 2.1 |
+| **Database** | SQLite (PostgreSQL untested) |
 | **Validation** | Pydantic v2 |
 | **Server** | Uvicorn (ASGI) |
 | **Migrations** | Alembic |
@@ -124,7 +222,7 @@ Vanilla-JS dashboard served at `/` (sign in first). Every panel reads a real API
 ## 📁 Project Structure
 
 ```
-project/
+digital-agentic-twin/
 ├── app/
 │   ├── __init__.py
 │   ├── main.py                  # FastAPI app entry point
@@ -165,17 +263,22 @@ project/
 │   │   ├── catalog_service.py   # Plan catalog reads
 │   │   ├── recommendation_service.py / run_service.py  # Proposal + run history reads
 │   │
+│   ├── core/                    # Auth tokens, passwords, access rules, rate limit, logging
+│   │
 │   ├── orchestrator/
 │   │   └── pipeline.py          # Decision cycle, run + step recording
 │   │
 │   └── utils/
 │       └── seed_data.py         # Database seeding utility
 │
+├── frontend/                    # Dashboard (index.html, script.js, styles.css; no build step)
 ├── migrations/versions/         # Alembic schema migrations
 ├── tests/                       # pytest suite
 ├── seed_data.py                 # Convenience CLI for seeding
-├── test_integration.py          # End-to-end integration tests
-├── requirements.txt
+├── demo.py                      # Scripted walk-through against a running server
+├── test_integration.py          # Smoke script for a live server
+├── Dockerfile / .dockerignore
+├── requirements.txt / requirements-dev.txt
 └── README.md
 ```
 
@@ -238,6 +341,7 @@ underutilized they are skipped (`"skipped"` in the response). A switch is only e
 | `GET` / `PUT` | `/api/users/{user_id}/preferences` | Budget, minimum data/minutes, required features, provider rules |
 | `GET` | `/api/users/{user_id}/consents` | Every consent scope and whether it is granted (default: denied) |
 | `PUT` | `/api/users/{user_id}/consents/{scope}` | Grant or revoke one scope (audited) |
+| `GET` | `/health` | Liveness + database check (no token; outside `/api`) |
 | `GET` | `/api/plans` | Plan catalog, cheapest first (`?provider=`, `?category=`) |
 
 > The seeded catalog is **demo data** (`source: "demo_seed"`), not live provider pricing.
@@ -274,7 +378,7 @@ underutilized they are skipped (`"skipped"` in the response). A switch is only e
 
 ### Prerequisites
 
-- Python 3.10 or higher
+- Python 3.12 (other versions are untested)
 - pip
 
 ### 1. Clone the repository
@@ -349,6 +453,31 @@ pytest
 The suite uses a throwaway SQLite database and needs no running server.
 `test_integration.py` is an older smoke script that runs against a live server
 (`python test_integration.py` with uvicorn running).
+
+### 8. Run with Docker
+
+The image runs as an unprivileged user with one Uvicorn worker, and keeps the
+SQLite database on a volume at `/data`. `SECRET_KEY` has no default: the container
+refuses to start without one.
+
+```bash
+docker build -t digital-twin .
+docker run -d --name twin -p 8000:8000 -v twin-data:/data \
+  -e SECRET_KEY="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')" digital-twin
+```
+
+Migrations run at startup. To load the demo data (local demos only — it creates
+accounts with a shared, published password):
+
+```bash
+docker exec twin python seed_data.py --reset
+```
+
+`GET /health` answers 200 when the database is reachable (503 otherwise) and is
+what the image's `HEALTHCHECK` calls. It needs no token.
+
+> The Dockerfile has not been built in the environment this README was written in
+> (no Docker daemon was running), so treat the first build as untested.
 
 ---
 
@@ -499,6 +628,47 @@ alembic revision --autogenerate -m "describe change"   # after editing app/model
 
 ---
 
+## 🛡 Production Readiness
+
+### Before exposing this to real users
+
+- [ ] Set a strong `SECRET_KEY` and `DEBUG=false` (the app will not start otherwise).
+- [ ] Put it behind a TLS-terminating proxy; the app sets no HSTS/CSP headers itself.
+- [ ] Set `CORS_ORIGINS` to the origins that really need it.
+- [ ] Do not seed demo data (it has a published password).
+- [ ] Back up the SQLite file (or move to a server database — see below) before upgrades; migrations run automatically at startup.
+- [ ] Decide whether open self-registration (`POST /api/auth/register`) is acceptable; it has no email verification.
+- [ ] Add a `LICENSE` file. The badge says MIT, but the repository does not contain one.
+
+### Known limitations
+
+These are properties of the code as it stands, not planned behaviour.
+
+**Scope**
+- Negotiation is simulated and the catalog is demo data (see the table above). Approving a change does not change anything at a real provider.
+- The analyzer is rule-based. Its "savings" are computed from the stored records and the catalog; they are not forecasts of real bills.
+
+**Security and accounts**
+- No password reset, no token refresh or revocation (a token is valid until it expires), and sign-ins are not written to the audit log.
+- The dashboard keeps the token in `sessionStorage`, so it is exposed to any script running on the page.
+- Rate limiting is in memory and per process: it resets on restart and does not span several workers or instances. Behind a proxy it keys on the address Uvicorn reports, so configure forwarded headers correctly.
+
+**Data**
+- Money is stored as floating point (`Float`), not decimals.
+- Only SQLite is exercised by the tests and migrations. PostgreSQL has not been tried.
+- SQLite allows one writer at a time; it suits a demo or a small single-node deployment.
+
+**Agents**
+- A proposal you reject can be proposed again on the next run (there is no cool-down).
+- *Agent Activity* shows a run's status as it was when the run finished.
+- Laplace noise uses fixed default scales (0.5 GB, 10 minutes) that the API does not expose, and no privacy budget (ε) is tracked.
+
+**Process**
+- There is no CI configuration in the repository; run `pytest` yourself.
+- `test_integration.py` is a smoke script for a live server, not part of `pytest`.
+
+---
+
 ## 🔮 Future Enhancements
 
 | Area | Enhancement |
@@ -508,11 +678,12 @@ alembic revision --autogenerate -m "describe change"   # after editing app/model
 | **Reinforcement Learning** | Train the negotiation agent using RL for optimal offer strategies |
 | **Stronger Privacy** | Implement ε-differential privacy with formal privacy budgets |
 | **Multi-User Scheduling** | Cron-based batch processing to run pipelines for all users periodically |
-| **PostgreSQL Migration** | Swap SQLite for PostgreSQL for production-scale deployments |
+| **PostgreSQL** | Verify migrations and tests on PostgreSQL for multi-user deployments |
 | **Accounts** | Password reset, token refresh/revocation, and audit entries for sign-ins |
 | **WebSocket Notifications** | Real-time pipeline progress updates via WebSocket |
 | **Usage Charts** | Trend charts on the dashboard (data is already served by the API) |
-| **Docker** | Containerize with Docker Compose for one-command deployment |
+| **CI** | Run the test suite and a Docker build on every push |
+| **Shared rate limiting** | Redis-backed counters so limits hold across workers |
 
 ---
 
