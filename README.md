@@ -93,6 +93,16 @@ Generates deterministic, human-readable explanations for every decision the syst
 - A failing agent is rolled back and recorded; independent steps still run
 - Final status: `awaiting_approval` / `completed` / `partial` / `failed`
 
+### 7. 🖥 Dashboard
+Vanilla-JS dashboard served at `/` (sign in first). Every panel reads a real API endpoint.
+
+- **Dashboard** — subscriptions, proposals awaiting approval, approved savings, last agent run
+- **Approvals** — each proposal with what/why/benefits/drawbacks, the evidence behind it, approve/reject, decision history
+- **Plans & Alternatives** — required capacity, every catalog plan as *fits* or *ruled out (reason)*, change history with undo
+- **Privacy Center** — grant/revoke each permission, edit preferences, recent consent and access-denied events
+- **Agent Activity** — per-agent status from recorded steps, and every run with its steps, timings and errors
+- Admins see other users' pages read-only; works down to phone width (375px)
+
 ---
 
 ## 🛠 Tech Stack
@@ -501,7 +511,7 @@ alembic revision --autogenerate -m "describe change"   # after editing app/model
 | **PostgreSQL Migration** | Swap SQLite for PostgreSQL for production-scale deployments |
 | **Accounts** | Password reset, token refresh/revocation, and audit entries for sign-ins |
 | **WebSocket Notifications** | Real-time pipeline progress updates via WebSocket |
-| **Dashboard UI** | React/Next.js frontend with usage charts and audit timeline |
+| **Usage Charts** | Trend charts on the dashboard (data is already served by the API) |
 | **Docker** | Containerize with Docker Compose for one-command deployment |
 
 ---

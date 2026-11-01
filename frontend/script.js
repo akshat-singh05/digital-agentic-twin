@@ -114,7 +114,7 @@ function effClass(eff) {
 }
 
 // Approve / reject controls for a proposed recommendation.
-function decisionPanel(recId, text, explanation) {
+function decisionPanel(recId, text, explanation, readOnly = false) {
   const list = (items, icon) => (items || []).map(i => `<div>${icon} ${esc(i)}</div>`).join('');
   return `
     <div class="result-message" id="decision-${recId}" style="border-color:var(--warning);background:var(--warning-bg)">
@@ -125,10 +125,11 @@ function decisionPanel(recId, text, explanation) {
         <div style="margin-top:8px"><strong>${esc(explanation.what)}</strong></div>
         <div style="margin-top:4px;color:var(--text-secondary)">${esc(explanation.why)}</div>
         <div style="margin-top:6px">${list(explanation.benefits, '✔')}${list(explanation.drawbacks, '⚠')}</div>` : ''}
-        <div style="margin-top:10px;display:flex;gap:8px">
+        ${readOnly ? '' : `
+        <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
           <button class="btn btn-primary btn-sm" onclick="decideRecommendation(${recId}, 'approve')">✅ Approve &amp; apply</button>
           <button class="btn btn-secondary btn-sm" onclick="decideRecommendation(${recId}, 'reject')">✖ Reject</button>
-        </div>
+        </div>`}
       </div>
     </div>`;
 }
@@ -141,8 +142,10 @@ async function decideRecommendation(recId, decision) {
     if (panel) panel.innerHTML = `<span class="msg-icon">${status === 'executed' ? '✅' : '✖'}</span>
       Recommendation #${recId} ${status === 'executed' ? 'approved and applied' : esc(status)}.`;
     toast('success', 'Decision recorded', `Recommendation #${recId}: ${status}`);
+    if (currentPage === 'approvals') renderApprovals();
   } catch (e) {
     toast('error', 'Decision failed', e.message);
+    if (currentPage === 'approvals') renderApprovals();   // e.g. it expired
   }
 }
 
@@ -166,6 +169,10 @@ const pageTitles = {
   negotiation:   'Negotiation Agent',
   switching:     'Plan Switching',
   audit:         'Audit Logs',
+  approvals:     'Approvals',
+  plans:         'Plans & Alternatives',
+  privacy:       'Privacy Center',
+  activity:      'Agent Activity',
 };
 
 function navigate(page) {
@@ -250,6 +257,10 @@ function renderPage(page) {
     negotiation:   renderNegotiation,
     switching:     renderSwitching,
     audit:         renderAudit,
+    approvals:     renderApprovals,
+    plans:         renderPlans,
+    privacy:       renderPrivacy,
+    activity:      renderActivity,
   };
 
   (renderers[page] || renderDashboard)();
@@ -262,54 +273,47 @@ async function renderDashboard() {
   const body = $('contentBody');
   try {
     const users = await listUsers();
-    let totalSubs = 0, activeSubs = 0;
-
-    // Count subscriptions for all users
-    for (const u of users.slice(0, 10)) {
-      try {
-        const subsRes = await apiGet(`/subscriptions/user/${u.id}`);
-        const subs = subsRes.data || [];
-        totalSubs += subs.length;
-        activeSubs += subs.filter(s => s.is_active).length;
-      } catch { /* skip */ }
-    }
+    const t = selectedUser ? await dashboardTotals(selectedUser) : null;
 
     body.innerHTML = `
       <div class="page-section">
+        ${t ? `
         <div class="stats-grid">
-          <div class="stat-card">
-            <div class="stat-icon purple">👥</div>
-            <div class="stat-info">
-              <div class="stat-label">Total Users</div>
-              <div class="stat-value">${users.length}</div>
-              <div class="stat-change up">↑ Active</div>
-            </div>
-          </div>
           <div class="stat-card">
             <div class="stat-icon blue">📱</div>
             <div class="stat-info">
-              <div class="stat-label">Total Subscriptions</div>
-              <div class="stat-value">${totalSubs}</div>
-              <div class="stat-change up">${activeSubs} active</div>
+              <div class="stat-label">Subscriptions</div>
+              <div class="stat-value">${t.subscriptions}</div>
+              <div class="stat-change up">${t.activeSubscriptions} active</div>
             </div>
           </div>
-          <div class="stat-card">
-            <div class="stat-icon green">🤖</div>
+          <div class="stat-card" onclick="navigate('approvals')" style="cursor:pointer">
+            <div class="stat-icon orange">📝</div>
             <div class="stat-info">
-              <div class="stat-label">AI Modules</div>
-              <div class="stat-value">5</div>
-              <div class="stat-change up">All Online</div>
+              <div class="stat-label">Awaiting Your Approval</div>
+              <div class="stat-value">${t.pending}</div>
+              <div class="stat-change ${t.pending ? 'down' : 'up'}">₹${t.pendingSavings}/month on offer</div>
             </div>
           </div>
           <div class="stat-card">
+            <div class="stat-icon green">💰</div>
+            <div class="stat-info">
+              <div class="stat-label">Approved Savings</div>
+              <div class="stat-value">₹${t.approvedSavings}</div>
+              <div class="stat-change up">per month · ${t.executed} change(s) applied</div>
+            </div>
+          </div>
+          <div class="stat-card" onclick="navigate('activity')" style="cursor:pointer">
             <div class="stat-icon cyan">⚡</div>
             <div class="stat-info">
-              <div class="stat-label">Pipeline Status</div>
-              <div class="stat-value">Ready</div>
-              <div class="stat-change up">Operational</div>
+              <div class="stat-label">Last Agent Run</div>
+              <div class="stat-value" style="font-size:1.1rem">${t.lastRun ? esc(t.lastRun.status.replace('_', ' ')) : 'Never'}</div>
+              <div class="stat-change ${t.failedSteps ? 'down' : 'up'}">${t.lastRun
+                ? `${fmtDateTime(t.lastRun.started_at)} · ${t.failedSteps} failed step(s)`
+                : 'Run the cycle below'}</div>
             </div>
           </div>
-        </div>
+        </div>` : ''}
 
         <!-- Pipeline Visual -->
         <div class="card">
@@ -1090,6 +1094,411 @@ async function renderAudit() {
 // ═════════════════════════════════════════════════════════
 //  INIT
 // ═════════════════════════════════════════════════════════
+// ═════════════════════════════════════════════════════════
+//  SHARED HELPERS (Phase F pages)
+// ═════════════════════════════════════════════════════════
+async function apiPut(path, body) { return api(path, 'PUT', body); }
+
+// Only the account owner may decide or change settings; admins view.
+function canAct() { return currentUser && Number(selectedUser) === currentUser.id; }
+
+function readOnlyNote() {
+  return canAct() ? '' : `<div class="result-message"><span class="msg-icon">👁</span>
+    View only — only the account owner can make decisions or change these settings.</div>`;
+}
+
+function statusBadge(status) {
+  const map = {
+    proposed: 'warning', executed: 'success', rejected: 'danger', expired: 'danger', failed: 'danger',
+    completed: 'success', awaiting_approval: 'warning', partial: 'warning', running: 'info', skipped: 'info',
+  };
+  return badge(String(status).replace('_', ' '), map[status] || 'info');
+}
+
+function money(v) { return v == null ? '—' : `₹${Number(v).toFixed(2).replace(/\.00$/, '')}`; }
+function limitText(v, unit) { return v == null ? 'unlimited' : `${v} ${unit}`; }
+
+async function dashboardTotals(userId) {
+  const [subs, recs, runs] = await Promise.all([
+    apiGet(`/subscriptions/user/${userId}`).then(r => r.data || []).catch(() => []),
+    apiGet(`/recommendations/user/${userId}?limit=200`).then(r => r.data || []).catch(() => []),
+    apiGet(`/runs/user/${userId}?limit=1`).then(r => r.data || []).catch(() => []),
+  ]);
+  const pending = recs.filter(r => r.status === 'proposed');
+  const executed = recs.filter(r => r.status === 'executed');
+  const sum = list => list.reduce((acc, r) => acc + (r.estimated_monthly_savings || 0), 0).toFixed(2);
+  const lastRun = runs[0] || null;
+  return {
+    subscriptions: subs.length,
+    activeSubscriptions: subs.filter(s => s.is_active).length,
+    pending: pending.length,
+    pendingSavings: sum(pending),
+    executed: executed.length,
+    approvedSavings: sum(executed),
+    lastRun,
+    failedSteps: lastRun ? lastRun.steps.filter(s => s.status === 'failed').length : 0,
+  };
+}
+
+// ═════════════════════════════════════════════════════════
+//  APPROVALS PAGE
+// ═════════════════════════════════════════════════════════
+async function renderApprovals() {
+  const body = $('contentBody');
+  if (!selectedUser) { body.innerHTML = emptyState('📝', 'Select a User', 'Choose a user to see their recommendations.'); return; }
+  try {
+    const recs = (await apiGet(`/recommendations/user/${selectedUser}?limit=100`)).data || [];
+    const open = recs.filter(r => r.status === 'proposed');
+    const decided = recs.filter(r => r.status !== 'proposed');
+
+    body.innerHTML = `
+      <div class="page-section">
+        ${readOnlyNote()}
+        <div class="card">
+          <div class="card-header"><h3>📝 Awaiting Your Decision</h3>${badge(open.length + ' open', open.length ? 'warning' : 'success')}</div>
+          ${open.length === 0
+            ? emptyState('✅', 'Nothing to decide', 'Run the decision cycle on the dashboard to look for savings.')
+            : open.map(r => recommendationCard(r)).join('')}
+        </div>
+        <div class="card" style="margin-top:20px">
+          <div class="card-header"><h3>🗂 Decision History</h3>${badge(decided.length + ' decided', 'info')}</div>
+          <div class="table-wrapper"><table>
+            <thead><tr><th>#</th><th>Action</th><th>Price</th><th>Saving / month</th><th>Status</th><th>Decided</th></tr></thead>
+            <tbody>
+              ${decided.length === 0 ? '<tr><td colspan="6" class="table-empty">No decisions yet</td></tr>' :
+                decided.map(r => `<tr>
+                  <td>${r.id}</td>
+                  <td>${esc(r.action.replace(/_/g, ' '))}</td>
+                  <td>${money(r.current_cost)} → ${money(r.proposed_cost)}</td>
+                  <td>${money(r.estimated_monthly_savings)}</td>
+                  <td>${statusBadge(r.status)}</td>
+                  <td style="color:var(--text-muted)">${r.decided_at ? fmtDateTime(r.decided_at) : '—'}</td>
+                </tr>`).join('')}
+            </tbody>
+          </table></div>
+        </div>
+      </div>`;
+  } catch (e) {
+    body.innerHTML = emptyState('⚠️', 'Failed to load recommendations', e.message);
+  }
+}
+
+function recommendationCard(r) {
+  const ex = r.evidence?.explanation;
+  const options = (r.evidence?.options_considered || [])
+    .map(o => `${esc(o.plan_name)} (${esc(o.action.replace(/_/g, ' '))}): ${money(o.monthly_savings)}/month`).join(' · ');
+  const excluded = (r.evidence?.alternatives_excluded || [])
+    .map(a => `<div>✖ ${esc(a.plan_name)} — ${esc(a.reasons[0] || '')}</div>`).join('');
+  return `
+    ${decisionPanel(r.id, `${money(r.current_cost)} → ${money(r.proposed_cost)} (save ${money(r.estimated_monthly_savings)}/month).`, ex, !canAct())}
+    <details style="margin:4px 0 16px 0;color:var(--text-secondary);font-size:0.82rem">
+      <summary style="cursor:pointer">Evidence behind recommendation #${r.id}</summary>
+      <div style="margin-top:8px">
+        <div><strong>Options compared:</strong> ${options || '—'}</div>
+        <div><strong>Risk:</strong> ${esc(r.evidence?.risk_flag || '—')} · <strong>minimum saving:</strong> ${r.evidence?.minimum_savings_pct ?? '—'}%</div>
+        ${ex?.data_used ? `<div><strong>Usage used:</strong> ${Object.entries(ex.data_used)
+            .filter(([, v]) => v !== null && v !== undefined)
+            .map(([k, v]) => `${esc(k.replace(/_/g, ' '))} ${esc(String(v))}`).join(' · ')}</div>` : ''}
+        ${excluded ? `<div style="margin-top:6px"><strong>Plans ruled out:</strong>${excluded}</div>` : ''}
+        <div style="margin-top:6px;color:var(--text-muted)">Proposed ${fmtDateTime(r.created_at)} · run #${r.run_id ?? '—'}</div>
+      </div>
+    </details>`;
+}
+
+// ═════════════════════════════════════════════════════════
+//  PLANS & ALTERNATIVES PAGE
+// ═════════════════════════════════════════════════════════
+async function renderPlans() {
+  const body = $('contentBody');
+  if (!selectedUser) { body.innerHTML = emptyState('📦', 'Select a User', 'Choose a user to compare plans.'); return; }
+  try {
+    const subs = ((await apiGet(`/subscriptions/user/${selectedUser}`)).data || []).filter(s => s.is_active);
+    body.innerHTML = `
+      <div class="page-section">
+        ${readOnlyNote()}
+        <p style="color:var(--text-secondary);font-size:0.88rem;margin-bottom:16px">
+          Catalog plans are checked against your peak and projected usage (+10% headroom) and your
+          preferences. Catalog prices are demo data, not live provider pricing.
+        </p>
+        ${subs.length === 0 ? emptyState('📦', 'No active subscriptions', 'Add one on the Subscriptions page.') :
+          subs.map(s => `
+          <div class="card" style="margin-bottom:20px">
+            <div class="card-header">
+              <h3>📱 ${esc(s.provider)} — ${esc(s.plan_name)}</h3>
+              ${badge(money(s.monthly_cost) + '/month', 'info')}
+            </div>
+            <div style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:12px">
+              Data ${limitText(s.data_limit_gb, 'GB')} · Calls ${limitText(s.call_minutes_limit, 'min')}
+            </div>
+            <div id="alts-${s.id}">${loading('Comparing catalog plans...')}</div>
+            <div id="history-${s.id}" style="margin-top:16px"></div>
+          </div>`).join('')}
+      </div>`;
+    for (const s of subs) {
+      loadAlternatives(s.id);
+      loadHistory(s.id);
+    }
+  } catch (e) {
+    body.innerHTML = emptyState('⚠️', 'Failed to load plans', e.message);
+  }
+}
+
+async function loadAlternatives(subId) {
+  const box = $(`alts-${subId}`);
+  try {
+    const a = (await apiGet(`/subscriptions/${subId}/alternatives`)).data;
+    const p = a.usage_profile || {};
+    const row = (plan, extra) => `<tr>
+      <td><strong>${esc(plan.provider)} ${esc(plan.plan_name)}</strong></td>
+      <td>${money(plan.monthly_cost)}</td>
+      <td>${limitText(plan.data_limit_gb, 'GB')}</td>
+      <td>${limitText(plan.call_minutes_limit, 'min')}</td>
+      <td>${extra}</td></tr>`;
+    box.innerHTML = `
+      <div style="font-size:0.82rem;color:var(--text-secondary);margin-bottom:10px">
+        Needs at least <strong>${a.required.data_gb} GB</strong> and <strong>${a.required.call_minutes} min</strong>
+        (peak ${p.peak_data_usage ?? 0} GB / ${p.peak_call_usage ?? 0} min, trend ${esc(p.data_trend || '—')}).
+        Effective current cost ${money(a.effective_current_cost)}/month${p.avg_overage ? ` incl. ${money(p.avg_overage)} overage` : ''}.
+      </div>
+      <div class="table-wrapper"><table>
+        <thead><tr><th>Plan</th><th>Price</th><th>Data</th><th>Calls</th><th>Verdict</th></tr></thead>
+        <tbody>
+          ${a.fits.map(f => row(f, `${badge('fits', 'success')} saves ${money(f.monthly_savings)} (${f.savings_pct}%)`)).join('')}
+          ${a.excluded.map(x => row(x, `${badge('ruled out', 'danger')} <span style="color:var(--text-muted)">${esc(x.reasons.join('; '))}</span>`)).join('')}
+          ${a.fits.length + a.excluded.length === 0 ? '<tr><td colspan="5" class="table-empty">No comparable catalog plans</td></tr>' : ''}
+        </tbody>
+      </table></div>`;
+  } catch (e) {
+    box.innerHTML = `<div class="result-message"><span class="msg-icon">🔒</span>${esc(e.message)}</div>`;
+  }
+}
+
+async function loadHistory(subId) {
+  const box = $(`history-${subId}`);
+  try {
+    const hist = (await apiGet(`/subscriptions/${subId}/history`)).data || [];
+    if (hist.length === 0) { box.innerHTML = ''; return; }
+    const last = hist[hist.length - 1];
+    box.innerHTML = `
+      <div style="font-weight:600;margin-bottom:8px">🕑 Change history</div>
+      <div class="table-wrapper"><table>
+        <thead><tr><th>When</th><th>Change</th><th>Price</th><th>Reason</th></tr></thead>
+        <tbody>${hist.map(h => `<tr>
+          <td style="color:var(--text-muted)">${fmtDateTime(h.created_at)}</td>
+          <td>${esc(h.change_type.replace('_', ' '))}</td>
+          <td>${money(h.previous_cost)} → ${money(h.new_cost)}</td>
+          <td style="color:var(--text-secondary)">${esc(h.reason || '')}</td></tr>`).join('')}
+        </tbody>
+      </table></div>
+      ${canAct() && last.change_type !== 'rollback'
+        ? `<button class="btn btn-secondary btn-sm" style="margin-top:10px" onclick="rollbackSubscription(${subId})">↩ Undo last change</button>`
+        : ''}`;
+  } catch (e) {
+    box.innerHTML = `<div class="result-message"><span class="msg-icon">⚠️</span>${esc(e.message)}</div>`;
+  }
+}
+
+async function rollbackSubscription(subId) {
+  if (!confirm('Restore the plan terms from before the last change?')) return;
+  try {
+    const r = (await apiPost(`/subscriptions/${subId}/rollback`)).data;
+    toast('success', 'Change undone', `Price restored to ${money(r.restored_cost)}/month.`);
+    renderPlans();
+  } catch (e) {
+    toast('error', 'Rollback failed', e.message);
+  }
+}
+
+// ═════════════════════════════════════════════════════════
+//  PRIVACY CENTER
+// ═════════════════════════════════════════════════════════
+async function renderPrivacy() {
+  const body = $('contentBody');
+  if (!selectedUser) { body.innerHTML = emptyState('🔒', 'Select a User', 'Choose a user to manage privacy.'); return; }
+  try {
+    const [consents, prefs, logs] = await Promise.all([
+      apiGet(`/users/${selectedUser}/consents`).then(r => r.data),
+      apiGet(`/users/${selectedUser}/preferences`).then(r => r.data),
+      apiGet(`/audit/${selectedUser}?limit=200`).then(r => r.data || []),
+    ]);
+    const events = logs.filter(l => l.action === 'consent' || l.action === 'access_denied').slice(0, 15);
+    const disabled = canAct() ? '' : 'disabled';
+
+    body.innerHTML = `
+      <div class="page-section">
+        ${readOnlyNote()}
+        <div class="two-col">
+          <div class="card">
+            <div class="card-header"><h3>🔒 Permissions</h3>${badge(consents.filter(c => c.granted).length + '/' + consents.length + ' granted', 'info')}</div>
+            <p style="color:var(--text-secondary);font-size:0.82rem;margin-bottom:12px">
+              Every agent asks the Privacy Mediator before using your data. Without a permission, that step is skipped.
+            </p>
+            ${consents.map(c => `
+              <label class="consent-row">
+                <input type="checkbox" ${c.granted ? 'checked' : ''} ${disabled}
+                       onchange="toggleConsent('${esc(c.scope)}', this)" />
+                <span>
+                  <strong>${esc(c.scope.replace(/_/g, ' '))}</strong>
+                  <span class="consent-desc">${esc(c.description)}</span>
+                </span>
+              </label>`).join('')}
+          </div>
+          <div class="card">
+            <div class="card-header"><h3>🎯 Preferences</h3></div>
+            <p style="color:var(--text-secondary);font-size:0.82rem;margin-bottom:12px">
+              The twin only recommends catalog plans that meet these.
+            </p>
+            <form onsubmit="savePreferences(event)">
+              <div class="form-grid">
+                <div class="form-group"><label>Max budget (₹/month)</label>
+                  <input type="number" min="1" step="any" id="prefBudget" value="${prefs.max_monthly_budget ?? ''}" ${disabled} /></div>
+                <div class="form-group"><label>Min data (GB)</label>
+                  <input type="number" min="0" step="any" id="prefData" value="${prefs.min_data_gb ?? ''}" ${disabled} /></div>
+                <div class="form-group"><label>Min call minutes</label>
+                  <input type="number" min="0" step="1" id="prefCalls" value="${prefs.min_call_minutes ?? ''}" ${disabled} /></div>
+                <div class="form-group"><label>Required features (comma-separated)</label>
+                  <input type="text" id="prefFeatures" placeholder="5g, hotspot" value="${esc(prefs.required_features.join(', '))}" ${disabled} /></div>
+                <div class="form-group"><label>Preferred providers (comma-separated)</label>
+                  <input type="text" id="prefProviders" placeholder="Jio, Airtel" value="${esc(prefs.preferred_providers.join(', '))}" ${disabled} /></div>
+                <label class="consent-row" style="align-self:end">
+                  <input type="checkbox" id="prefAllowChange" ${prefs.allow_provider_change ? 'checked' : ''} ${disabled} />
+                  <span><strong>Allow switching provider</strong></span>
+                </label>
+              </div>
+              ${canAct() ? '<button class="btn btn-primary" type="submit" id="btnPrefs" style="margin-top:12px">💾 Save preferences</button>' : ''}
+            </form>
+          </div>
+        </div>
+        <div class="card" style="margin-top:20px">
+          <div class="card-header"><h3>🕑 Privacy Activity</h3>${badge(events.length + ' recent', 'info')}</div>
+          ${events.length === 0 ? emptyState('🔒', 'No privacy events yet', 'Permission changes and blocked agent access appear here.') :
+            `<div class="audit-timeline">${events.map(l => `
+              <div class="audit-entry">
+                <div class="audit-header">
+                  <span class="audit-action badge-${l.action === 'access_denied' ? 'danger' : 'info'}">${l.action === 'access_denied' ? '⛔ access denied' : '🔑 consent'}</span>
+                  <span class="audit-time">${fmtDateTime(l.created_at)}</span>
+                </div>
+                <div class="audit-desc">${esc(l.description)}</div>
+              </div>`).join('')}</div>`}
+        </div>
+      </div>`;
+  } catch (e) {
+    body.innerHTML = emptyState('⚠️', 'Failed to load privacy settings', e.message);
+  }
+}
+
+async function toggleConsent(scope, checkbox) {
+  checkbox.disabled = true;
+  try {
+    await apiPut(`/users/${selectedUser}/consents/${scope}`, { granted: checkbox.checked });
+    toast('success', 'Permission updated', `${scope.replace(/_/g, ' ')}: ${checkbox.checked ? 'granted' : 'revoked'}`);
+    renderPrivacy();
+  } catch (e) {
+    checkbox.checked = !checkbox.checked;
+    checkbox.disabled = false;
+    toast('error', 'Update failed', e.message);
+  }
+}
+
+async function savePreferences(e) {
+  e.preventDefault();
+  const num = id => { const v = $(id).value.trim(); return v === '' ? null : Number(v); };
+  const list = id => $(id).value.split(',').map(x => x.trim()).filter(Boolean);
+  const btn = $('btnPrefs');
+  btn.disabled = true;
+  try {
+    await apiPut(`/users/${selectedUser}/preferences`, {
+      max_monthly_budget: num('prefBudget'),
+      min_data_gb: num('prefData'),
+      min_call_minutes: num('prefCalls'),
+      required_features: list('prefFeatures'),
+      preferred_providers: list('prefProviders'),
+      allow_provider_change: $('prefAllowChange').checked,
+    });
+    toast('success', 'Preferences saved', 'Future recommendations will respect them.');
+    renderPrivacy();
+  } catch (err) {
+    toast('error', 'Save failed', err.message);
+    btn.disabled = false;
+  }
+}
+
+// ═════════════════════════════════════════════════════════
+//  AGENT ACTIVITY PAGE
+// ═════════════════════════════════════════════════════════
+const AGENT_LABELS = {
+  usage_analyzer: '📊 Usage Analyzer',
+  privacy_mediator: '🔒 Privacy Mediator',
+  negotiation_agent: '🤝 Negotiation Agent',
+  plan_switching: '🔄 Plan Switching',
+};
+
+function summaryText(summary) {
+  if (!summary) return '';
+  return Object.entries(summary)
+    .filter(([, v]) => v !== null && v !== undefined)
+    .map(([k, v]) => `${k.replace(/_/g, ' ')}: ${v}`).join(' · ');
+}
+
+async function renderActivity() {
+  const body = $('contentBody');
+  if (!selectedUser) { body.innerHTML = emptyState('⚡', 'Select a User', 'Choose a user to see agent activity.'); return; }
+  try {
+    const runs = (await apiGet(`/runs/user/${selectedUser}?limit=20`)).data || [];
+
+    // Per-agent status, from recorded steps only
+    const health = Object.keys(AGENT_LABELS).map(agent => {
+      const steps = runs.flatMap(r => r.steps.filter(s => s.agent === agent).map(s => ({ ...s, run: r })));
+      const last = steps[0];
+      const count = st => steps.filter(s => s.status === st).length;
+      const avg = steps.filter(s => s.duration_ms != null);
+      return { agent, last, completed: count('completed'), skipped: count('skipped'), failed: count('failed'),
+               avgMs: avg.length ? Math.round(avg.reduce((a, s) => a + s.duration_ms, 0) / avg.length) : null };
+    });
+
+    body.innerHTML = `
+      <div class="page-section">
+        <div class="card">
+          <div class="card-header"><h3>🤖 Agents</h3>${badge('last ' + runs.length + ' runs', 'info')}</div>
+          <div class="table-wrapper"><table>
+            <thead><tr><th>Agent</th><th>Last status</th><th>Completed</th><th>Skipped</th><th>Failed</th><th>Avg time</th><th>Last note</th></tr></thead>
+            <tbody>${health.map(h => `<tr>
+              <td><strong>${AGENT_LABELS[h.agent]}</strong></td>
+              <td>${h.last ? statusBadge(h.last.status) : badge('not run yet', 'info')}</td>
+              <td>${h.completed}</td><td>${h.skipped}</td>
+              <td style="color:${h.failed ? 'var(--danger)' : 'inherit'}">${h.failed}</td>
+              <td>${h.avgMs == null ? '—' : h.avgMs + ' ms'}</td>
+              <td style="color:var(--text-secondary);font-size:0.8rem">${esc(h.last?.error || summaryText(h.last?.summary) || '')}</td>
+            </tr>`).join('')}</tbody>
+          </table></div>
+        </div>
+        <div class="card" style="margin-top:20px">
+          <div class="card-header"><h3>⚡ Run History</h3></div>
+          ${runs.length === 0 ? emptyState('⚡', 'No runs yet', 'Run the decision cycle from the dashboard.') :
+            runs.map(r => `
+            <details class="run-entry">
+              <summary>
+                <strong>Run #${r.id}</strong> ${statusBadge(r.status)}
+                <span style="color:var(--text-muted);font-size:0.8rem">${fmtDateTime(r.started_at)}</span>
+                ${r.error ? `<span style="color:var(--danger);font-size:0.8rem">${esc(r.error)}</span>` : ''}
+              </summary>
+              <div class="table-wrapper"><table>
+                <thead><tr><th>Step</th><th>Status</th><th>Time</th><th>Details</th></tr></thead>
+                <tbody>${r.steps.map(s => `<tr>
+                  <td>${AGENT_LABELS[s.agent] || esc(s.agent)}</td>
+                  <td>${statusBadge(s.status)}</td>
+                  <td>${s.duration_ms == null ? '—' : s.duration_ms + ' ms'}</td>
+                  <td style="color:${s.error ? 'var(--danger)' : 'var(--text-secondary)'};font-size:0.8rem">${esc(s.error || summaryText(s.summary))}</td>
+                </tr>`).join('')}</tbody>
+              </table></div>
+            </details>`).join('')}
+        </div>
+      </div>`;
+  } catch (e) {
+    body.innerHTML = emptyState('⚠️', 'Failed to load agent activity', e.message);
+  }
+}
+
 let registering = false;
 
 function showLogin(message = '') {
