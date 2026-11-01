@@ -478,8 +478,7 @@ docker exec twin python seed_data.py --reset
 `GET /health` answers 200 when the database is reachable (503 otherwise) and is
 what the image's `HEALTHCHECK` calls. It needs no token.
 
-> The Dockerfile has not been built in the environment this README was written in
-> (no Docker daemon was running), so treat the first build as untested.
+> Verified on Docker Desktop (Windows, Linux containers): the image builds, refuses to start without `SECRET_KEY`, runs as a non-root user, reports healthy, and the seeding and sign-in steps above work.
 
 ---
 
