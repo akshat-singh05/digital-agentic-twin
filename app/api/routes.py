@@ -49,7 +49,8 @@ from app.modules.usage_analyzer.service import analyze_user_usage
 from app.modules.privacy_mediator.service import get_sanitized_usage
 from app.modules.negotiation_agent.service import run_negotiation
 from app.modules.plan_switching.service import (
-    approve_recommendation, propose_plan_switch, reject_recommendation, rollback_last_change,
+    approve_recommendation, get_alternatives, propose_plan_switch, reject_recommendation,
+    rollback_last_change,
 )
 from app.modules.audit_logger.service import get_user_audit_logs
 from app.orchestrator.pipeline import run_cycle as run_orchestrator_cycle
@@ -297,6 +298,24 @@ def get_subscription_history(sub_id: int, db: Session = Depends(get_db)):
     except ValueError as e:
         _raise_not_found(e)
     return {"status": "success", "data": subscription_service.get_plan_history(db, sub_id)}
+
+
+@router.get(
+    "/subscriptions/{sub_id}/alternatives",
+    response_model=SuccessResponse[dict],
+    tags=["Plan Switching"],
+)
+def get_subscription_alternatives(sub_id: int, db: Session = Depends(get_db)):
+    """
+    Catalog plans that fit this subscription's measured usage and the
+    user's preferences (best saving first), plus every plan that was
+    excluded and why.  Requires the ``usage_analysis`` consent.
+    """
+    try:
+        result = get_alternatives(db, sub_id)
+    except ValueError as e:
+        _raise_for(e)
+    return {"status": "success", "data": result}
 
 
 # ═════════════════════════════════════════════════════════════

@@ -104,16 +104,22 @@ def main():
     for log in logs:
         print(f"       [{log['action']:18s}] {log['description'][:70]}")
 
-    # === Edge case: switch again with no NEW negotiation ===
-    code2, res2 = _post(f"/switch/{uid}")
-    sw2 = res2["data"]
-    print(f"\n✅ 8. Second switch (same negotiation):")
-    assert sw2["proposed"] is False, sw2
-    print(f"       proposed={sw2['proposed']}, risk={sw2['risk_flag']}")
+    # === Edge case: evaluate again — nothing new should be proposed ===
+    # After a switch the plan usually fits (409: no opportunity left);
+    # otherwise the stale negotiation must not be re-applied (proposed=False).
+    print(f"\n✅ 8. Second switch evaluation:")
+    try:
+        code2, res2 = _post(f"/switch/{uid}")
+        assert res2["data"]["proposed"] is False, res2
+        print(f"       proposed=False, reason={res2['data']['reason'][:60]}")
+    except urllib.error.HTTPError as e:
+        assert e.code == 409, e.code
+        print(f"       HTTP 409 — no optimization opportunity left")
 
     # === Edge case: user with no subscription ===
     code3, res3 = _post("/users", {"name": "No Sub User", "email": f"nosub_{ts}@test.com"})
     uid2 = res3["data"]["id"]
+    _grant_all_consents(uid2)
     try:
         _post(f"/switch/{uid2}")
         print("❌ 9. Expected error for user with no subscription!")

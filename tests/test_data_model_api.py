@@ -92,7 +92,7 @@ def test_two_plans_with_one_provider_are_analyzed_separately(client):
 
 # ── Plan history ─────────────────────────────────────────────
 def test_applied_switch_is_recorded_in_plan_history(client, monkeypatch):
-    monkeypatch.setattr(engine, "_initial_offer", lambda cost, eff: round(cost * 0.9, 2))
+    monkeypatch.setattr(engine, "_initial_offer", lambda cost, eff, rng: round(cost * 0.9, 2))
     monkeypatch.setattr(engine, "_is_accepted", lambda offer, counter: True)
     uid = make_user(client)
     sub = make_subscription(client, uid)

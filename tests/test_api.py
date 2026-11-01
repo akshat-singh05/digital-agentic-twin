@@ -125,7 +125,7 @@ def test_switch_is_not_proposed_when_negotiation_failed(client, monkeypatch):
 
 def _forced_deal(monkeypatch):
     """Make every negotiation end in a deal at exactly 10% off."""
-    monkeypatch.setattr(engine, "_initial_offer", lambda cost, eff: round(cost * 0.9, 2))
+    monkeypatch.setattr(engine, "_initial_offer", lambda cost, eff, rng: round(cost * 0.9, 2))
     monkeypatch.setattr(engine, "_is_accepted", lambda offer, counter: True)
 
 

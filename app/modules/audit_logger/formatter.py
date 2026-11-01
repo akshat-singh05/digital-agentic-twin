@@ -31,25 +31,35 @@ def _format_analysis(payload: Dict[str, Any]) -> str:
     Generate an explanation for a usage analysis decision.
 
     Expected payload keys:
-        recommendation, efficiency, savings_estimate,
-        provider, plan_name, usage_category
+        recommendation, efficiency, binding_metric, unused_spend,
+        avg_overage, data_trend, provider, plan_name
     """
     recommendation = _safe_get(payload, "recommendation", "unknown")
     efficiency = _safe_get(payload, "efficiency", 0)
-    savings = _safe_get(payload, "savings_estimate", 0)
+    unused = _safe_get(payload, "unused_spend", 0)
+    overage = _safe_get(payload, "avg_overage", 0)
+    metric = _safe_get(payload, "binding_metric", "usage")
+    trend = _safe_get(payload, "data_trend", "")
     provider = _safe_get(payload, "provider", "unknown")
     plan_name = _safe_get(payload, "plan_name", "unknown")
     usage_pct = round(efficiency * 100, 1)
+    trend_note = f", data trend {trend}" if trend in ("rising", "falling", "stable") else ""
 
     if recommendation == "downgrade":
         return (
-            f"Downgrade recommended: usage at {usage_pct}% on {provider} ({plan_name}), "
-            f"estimated unused spend ₹{savings}/month."
+            f"Downgrade recommended: {metric} usage at {usage_pct}% on {provider} "
+            f"({plan_name}){trend_note}; ₹{unused}/month pays for unused capacity."
         )
     elif recommendation == "upgrade":
+        overage_note = f" Average overage billed ₹{overage}/month." if overage else ""
         return (
-            f"Plan upgrade recommended: usage at {usage_pct}% on {provider} ({plan_name}), "
-            f"approaching or exceeding plan limits."
+            f"Plan upgrade recommended: {metric} usage at {usage_pct}% on {provider} "
+            f"({plan_name}){trend_note}.{overage_note}"
+        )
+    elif recommendation == "no_metric":
+        return (
+            f"Utilisation not measurable for {provider} ({plan_name}): "
+            f"the plan has no data or call cap."
         )
     elif recommendation == "keep":
         return (
@@ -92,10 +102,11 @@ def _format_negotiation(payload: Dict[str, Any]) -> str:
             f"(₹{original} → ₹{final})."
         )
     else:
+        reservation = payload.get("reservation_price")
+        walk_away = f" No deal within the walk-away price of ₹{reservation}." if reservation else ""
         return (
             f"Negotiation {status} after {total_rounds} round(s) with {provider}. "
-            f"Final offer ₹{final} vs original ₹{original} "
-            f"({savings_pct}% difference)."
+            f"Provider's last counter ₹{final} vs original ₹{original}.{walk_away}"
         )
 
 
@@ -104,7 +115,8 @@ def _format_switching(payload: Dict[str, Any]) -> str:
     Generate an explanation for a plan-switching decision.
 
     Expected payload keys:
-        applied, risk_flag, previous_cost, proposed_cost, reason
+        applied, proposed, risk_flag, previous_cost, proposed_cost,
+        monthly_savings (effective, incl. overage), proposed_plan_name, reason
     """
     applied = _safe_get(payload, "applied", False)
     risk = _safe_get(payload, "risk_flag", "unknown")
@@ -112,18 +124,22 @@ def _format_switching(payload: Dict[str, Any]) -> str:
     new_cost = _safe_get(payload, "proposed_cost", 0)
     reason = _safe_get(payload, "reason", "")
 
-    savings = round(prev_cost - new_cost, 2)
+    savings = payload.get("monthly_savings")
+    if savings is None:
+        savings = round(prev_cost - new_cost, 2)
     rec_id = _safe_get(payload, "recommendation_id", None)
+    new_plan = payload.get("proposed_plan_name")
+    change = f"{payload.get('plan_name')} → {new_plan} " if new_plan else ""
 
     if applied:
         approval = f" Approved by user (recommendation #{rec_id})." if payload.get("approved_by_user") else ""
         return (
-            f"Switch applied: cost reduced ₹{prev_cost} → ₹{new_cost} "
+            f"Switch applied: ₹{prev_cost} → ₹{new_cost} "
             f"(saving ₹{savings}/month), risk level {risk}.{approval}"
         )
     if payload.get("proposed"):
         return (
-            f"Switch proposed: ₹{prev_cost} → ₹{new_cost} (saving ₹{savings}/month), "
+            f"Switch proposed: {change}₹{prev_cost} → ₹{new_cost} (saving ₹{savings}/month), "
             f"risk level {risk}. Awaiting user approval (recommendation #{rec_id})."
         )
     if reason:

@@ -6,17 +6,20 @@ Fetches all active subscriptions, runs the pure analyzer on each,
 and picks the subscription with the clearest optimization opportunity.
 """
 
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.core.logger import get_logger
-from app.models import Subscription, UsageData
+from app.models import PlanHistory, Subscription, UsageData
 from app.services.user_service import require_user
 from app.modules.audit_logger.service import create_audit_log
 from app.modules.privacy_mediator.service import require_consent
 from app.modules.usage_analyzer.analyzer import (
     analyze_usage,
+    opportunity_value,
     pick_best_plan,
     pick_optimization_target,
 )
@@ -48,12 +51,23 @@ def _get_active_subscriptions(db: Session, user_id: int) -> List[Subscription]:
     )
 
 
+def _last_plan_change(db: Session, subscription: Subscription) -> Optional[datetime]:
+    """When the subscription's terms last changed (None if never)."""
+    return (
+        db.query(func.max(PlanHistory.created_at))
+        .filter(PlanHistory.subscription_id == subscription.id)
+        .scalar()
+    )
+
+
 def analyze_subscription(
     db: Session, user_id: int, subscription: Subscription
 ) -> Dict[str, Any]:
     """Run analysis for one subscription and attach context fields (no audit)."""
     usage_records = get_usage_for_subscription(db, subscription)
-    result = analyze_usage(usage_records, subscription)
+    result = analyze_usage(
+        usage_records, subscription, overage_since=_last_plan_change(db, subscription),
+    )
 
     # Attach context so the caller knows which subscription this belongs to
     result["subscription_id"] = subscription.id
@@ -61,6 +75,9 @@ def analyze_subscription(
     result["provider"] = subscription.provider
     result["plan_name"] = subscription.plan_name
     result["monthly_cost"] = subscription.monthly_cost
+    result["data_limit_gb"] = subscription.data_limit_gb
+    result["call_minutes_limit"] = subscription.call_minutes_limit
+    result["opportunity_value"] = opportunity_value(result)
 
     return result
 
@@ -68,7 +85,7 @@ def analyze_subscription(
 def find_optimization_target(db: Session, user_id: int) -> Optional[Dict[str, Any]]:
     """
     Return the analysis of the subscription the other agents should act on,
-    or None when no active subscription is underutilized.  Writes no audit log.
+    or None when no active subscription has an opportunity.  Writes no audit log.
     """
     analyses = [
         analyze_subscription(db, user_id, sub)
@@ -77,20 +94,27 @@ def find_optimization_target(db: Session, user_id: int) -> Optional[Dict[str, An
     return pick_optimization_target(analyses)
 
 
+def _summary(a: Dict[str, Any]) -> Dict[str, Any]:
+    keys = ("subscription_id", "provider", "plan_name", "monthly_cost", "efficiency",
+            "recommendation", "usage_category", "unused_spend", "avg_overage",
+            "opportunity_value", "confidence_score")
+    return {k: a.get(k) for k in keys}
+
+
 def analyze_user_usage(db: Session, user_id: int) -> Dict[str, Any]:
     """
     Analyze ALL active subscriptions for a user and record the decision.
 
     Steps:
-        1. Validate user exists.
+        1. Validate user exists and has consented to analysis.
         2. Fetch all active subscriptions.
-        3. For each subscription, fetch matching usage records and analyze.
-        4. Pick the optimization target (largest underutilized plan) and
+        3. For each subscription, fetch its usage records and analyze.
+        4. Pick the optimization target (largest ₹/month at stake) and
            the best-fit plan.
         5. Write one audit log entry and return the comparison.
 
-    The top-level fields describe the optimization target when there is
-    one, otherwise the best-fit plan.
+    The top-level metric fields describe the optimization target when there
+    is one, otherwise the best-fit plan.
 
     Raises:
         ValueError:           If user not found.
@@ -107,13 +131,11 @@ def analyze_user_usage(db: Session, user_id: int) -> Dict[str, Any]:
     if not subscriptions:
         response = {
             "user_id": user_id,
-            "efficiency": 0,
-            "avg_data_usage": 0,
-            "avg_call_usage": 0,
+            "efficiency": None,
             "recommendation": "no_subscription",
-            "message": "User has no active subscription to analyze.",
-            "savings_estimate": 0,
             "usage_category": "unknown",
+            "message": "User has no active subscription to analyze.",
+            "unused_spend": 0,
             "confidence_score": 0,
             "best_plan": None,
             "optimization_target": None,
@@ -123,49 +145,19 @@ def analyze_user_usage(db: Session, user_id: int) -> Dict[str, Any]:
         return response
 
     # Step 3 — Analyze each subscription
-    analyses = [
-        analyze_subscription(db, user_id, sub)
-        for sub in subscriptions
-    ]
+    analyses = [analyze_subscription(db, user_id, sub) for sub in subscriptions]
 
     # Step 4 — Pick target and best plan
     target = pick_optimization_target(analyses)
     best = pick_best_plan(analyses)
     headline = target or best
 
-    # Step 5 — Build response
+    # Step 5 — Build response (headline metrics + comparison)
     response = {
+        **headline,
         "user_id": user_id,
-        "subscription_id": headline["subscription_id"],
-        "efficiency": headline["efficiency"],
-        "avg_data_usage": headline["avg_data_usage"],
-        "avg_call_usage": headline["avg_call_usage"],
-        "recommendation": headline["recommendation"],
-        "message": headline["message"],
-        "savings_estimate": headline["savings_estimate"],
-        "usage_category": headline["usage_category"],
-        "confidence_score": headline["confidence_score"],
-        "provider": headline["provider"],
-        "plan_name": headline["plan_name"],
-        "monthly_cost": headline["monthly_cost"],
-        "best_plan": {
-            "subscription_id": best["subscription_id"],
-            "provider": best["provider"],
-            "plan_name": best["plan_name"],
-            "monthly_cost": best["monthly_cost"],
-            "efficiency": best["efficiency"],
-            "recommendation": best["recommendation"],
-            "savings_estimate": best["savings_estimate"],
-            "usage_category": best["usage_category"],
-            "confidence_score": best["confidence_score"],
-        },
-        "optimization_target": {
-            "subscription_id": target["subscription_id"],
-            "provider": target["provider"],
-            "plan_name": target["plan_name"],
-            "monthly_cost": target["monthly_cost"],
-            "savings_estimate": target["savings_estimate"],
-        } if target else None,
+        "best_plan": _summary(best),
+        "optimization_target": _summary(target) if target else None,
         "analysis": analyses,
     }
 

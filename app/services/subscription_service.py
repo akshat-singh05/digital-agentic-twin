@@ -59,6 +59,8 @@ def create_subscription(db: Session, sub_data: dict) -> Subscription:
                 f"Catalog plan {catalog_plan_id} belongs to {plan.provider}, "
                 f"not {sub_data['provider']}"
             )
+        if sub_data.get("features") is None:
+            sub_data = dict(sub_data, features=plan.features)
 
     sub = Subscription(**sub_data)
     with transactional(db):

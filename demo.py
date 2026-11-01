@@ -81,13 +81,15 @@ def print_analysis(data):
     kv("Provider", data.get("provider", "—"))
     kv("Plan", data.get("plan_name", "—"))
     kv("Monthly Cost", f"Rs.{data.get('monthly_cost', 0)}")
-    kv("Efficiency", f"{data.get('efficiency', 0) * 100:.1f}%")
+    eff = data.get("efficiency")
+    kv("Utilisation", f"{eff * 100:.1f}% ({data.get('binding_metric')})" if eff is not None else "not measurable")
     kv("Category", data.get("usage_category", "—"))
     kv("Recommendation", data.get("recommendation", "—").upper())
-    kv("Savings Estimate", f"Rs.{data.get('savings_estimate', 0)}/month")
-    kv("Confidence Score", f"{data.get('confidence_score', 0) * 100:.0f}%")
-    kv("Avg Data Usage", f"{data.get('avg_data_usage', 0)} GB")
-    kv("Avg Call Usage", f"{data.get('avg_call_usage', 0)} min")
+    kv("Unused Spend", f"Rs.{data.get('unused_spend', 0)}/month (not a saving)")
+    kv("Confidence Score", f"{(data.get('confidence_score') or 0) * 100:.0f}%")
+    kv("Data (avg / peak)", f"{data.get('avg_data_usage', 0)} / {data.get('peak_data_usage', 0)} GB, trend {data.get('data_trend', '—')}")
+    kv("Calls (avg / peak)", f"{data.get('avg_call_usage', 0)} / {data.get('peak_call_usage', 0)} min")
+    kv("Overage Billed", f"Rs.{data.get('avg_overage', 0)}/month")
     msg = data.get("message", "")
     if msg:
         print(f"\n      Note: {msg}")
@@ -100,8 +102,9 @@ def print_negotiation(data):
     kv("Original Cost", f"Rs.{data.get('original_cost', 0)}")
     kv("Final Price", f"Rs.{data.get('final_price', 0)}")
     kv("Savings", f"{data.get('savings_pct', 0)}%")
+    kv("Walk-away Price", f"Rs.{data.get('reservation_price', '—')}")
     kv("Total Rounds", str(data.get("total_rounds", 0)))
-    kv("Outcome", status_label(data.get("status", "unknown")))
+    kv("Outcome", status_label(data.get("status", "unknown")) + " (simulated provider)")
 
     rounds = data.get("rounds", [])
     if rounds:
@@ -125,9 +128,19 @@ def print_switching(data):
         if proposed else "[NOT PROPOSED]"
     )
     kv("Decision", decision)
+    kv("Action", data.get("action") or "—")
     kv("Projected Cost", f"Rs.{data.get('projected_cost', 0)}")
+    kv("Monthly Saving", f"Rs.{data.get('estimated_monthly_savings', 0)}")
     kv("Risk Level", data.get("risk_flag", "—").upper())
-    reason = data.get("reason", "")
+    explanation = data.get("explanation")
+    if explanation:
+        print()
+        print("      " + textwrap.fill(explanation["what"], width=56, subsequent_indent="      "))
+        for item in explanation["benefits"]:
+            print("        + " + textwrap.fill(item, width=52, subsequent_indent="          "))
+        for item in explanation["drawbacks"]:
+            print("        - " + textwrap.fill(item, width=52, subsequent_indent="          "))
+    reason = data.get("reason", "") if not explanation else ""
     if reason:
         wrapped = textwrap.fill(reason, width=52, initial_indent="", subsequent_indent="        ")
         print(f"\n      Reason: {wrapped}")

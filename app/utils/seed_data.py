@@ -188,13 +188,17 @@ def _upsert_catalog(db) -> dict:
     return {key: plan.id for key, plan in existing.items()}
 
 
-def seed(reset: bool = False):
+def seed(reset: bool = False, random_seed: int = 42):
     """
     Populate the database with demo data.
 
     Args:
-        reset: If True, drop all tables and re-run migrations first.
+        reset:       If True, drop all tables and re-run migrations first.
+        random_seed: Seed for the generated demo data, so a reset always
+                     rebuilds the same dataset.
     """
+    random.seed(random_seed)
+
     if reset:
         print("🔄  Dropping all tables...")
         Base.metadata.drop_all(bind=engine)
@@ -327,8 +331,14 @@ def main():
         action="store_true",
         help="Drop and recreate all tables before seeding (fresh start).",
     )
+    parser.add_argument(
+        "--random-seed",
+        type=int,
+        default=42,
+        help="Seed for the generated demo data (default: 42 — same data every reset).",
+    )
     args = parser.parse_args()
-    seed(reset=args.reset)
+    seed(reset=args.reset, random_seed=args.random_seed)
 
 
 if __name__ == "__main__":

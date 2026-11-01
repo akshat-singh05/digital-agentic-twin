@@ -1,10 +1,12 @@
 """
 Orchestrator — the Digital Twin's decision cycle for one user.
 
-    1. Usage Analyzer    → efficiency per subscription + optimization target
+    1. Usage Analyzer    → usage metrics per subscription + optimization target
     2. Privacy Mediator  → differentially-private usage for sharing
-    3. Negotiation Agent → simulated negotiation on the target
-    4. Plan Switching    → evaluates the deal; proposes a Recommendation
+    3. Negotiation Agent → simulated negotiation on an underutilized target,
+                           with the best catalog alternative as walk-away price
+    4. Plan Switching    → compares the deal with catalog alternatives;
+                           proposes the better one as a Recommendation
     ── the run stops here ("awaiting_approval") until the user decides ──
 
 Rules the orchestrator enforces:
@@ -13,6 +15,8 @@ Rules the orchestrator enforces:
     an error.
   - Negotiation and switching act only on the analyzer's target, and not
     at all while a proposal for that subscription awaits a decision.
+    Negotiation runs only for an underutilized target; switching still
+    checks catalog alternatives if negotiation was skipped or failed.
   - Each step's timing, outcome and error are stored in agent_run_steps;
     audit entries and recommendations carry the run id.
   - A failing step is rolled back and recorded; later steps that need its
@@ -60,9 +64,9 @@ def _summarize(agent: str, result: Dict[str, Any]) -> Dict[str, Any]:
     if agent == "privacy_mediator":
         return {"sanitized_records": len(result.get("sanitized_usage", []))}
     if agent == "negotiation_agent":
-        return {k: result.get(k) for k in ("status", "final_price", "total_rounds", "simulated")}
+        return {k: result.get(k) for k in ("status", "final_price", "reservation_price", "total_rounds", "simulated")}
     if agent == "plan_switching":
-        return {k: result.get(k) for k in ("proposed", "recommendation_id", "risk_flag")}
+        return {k: result.get(k) for k in ("proposed", "recommendation_id", "action", "risk_flag")}
     return {}
 
 
@@ -167,39 +171,44 @@ def run_cycle(db: Session, user_id: int, trigger: str = "api") -> Dict[str, Any]
         sanitized = record("sanitization", _step(
             db, run, "privacy_mediator", lambda: get_sanitized_usage(db, user_id)), "Data Sanitization")
 
-        # 3 — Negotiation on the target, if there is one to act on
+        # 3/4 — Act on the target, if there is one and nothing is pending
         target = (analysis or {}).get("optimization_target")
         reason = None
         if analysis is None:
             reason = "usage analysis did not run"
         elif target is None:
-            reason = "no underutilized subscription — nothing to negotiate"
-        elif sanitized is None:
-            reason = "privacy-protected usage data is not available"
+            reason = "no subscription with an optimization opportunity"
         else:
             pending = pending_recommendation(db, target["subscription_id"])
             if pending is not None:
                 reason = f"recommendation #{pending.id} is awaiting your decision"
 
-        negotiation = None
         if reason:
             for agent, key in (("negotiation_agent", "negotiation"), ("plan_switching", "switching")):
                 _skip(db, run, agent, reason)
                 skipped[key] = reason
         else:
             target_id = target["subscription_id"]
-            negotiation = record("negotiation", _step(
-                db, run, "negotiation_agent",
-                lambda: run_negotiation(db, user_id, subscription_id=target_id)), "Negotiation")
 
-            # 4 — Evaluate and propose (never applies the change)
-            if negotiation is None:
-                _skip(db, run, "plan_switching", "negotiation did not complete")
-                skipped["switching"] = "negotiation did not complete"
+            # 3 — Negotiate a discount only on an underutilized plan
+            if target["recommendation"] != "downgrade":
+                why = "plan is overutilized — a discount on a plan that is too small won't help"
+            elif sanitized is None:
+                why = "privacy-protected usage data is not available"
             else:
-                record("switching", _step(
-                    db, run, "plan_switching",
-                    lambda: propose_plan_switch(db, user_id, subscription_id=target_id)), "Plan Switching")
+                why = None
+            if why:
+                _skip(db, run, "negotiation_agent", why)
+                skipped["negotiation"] = why
+            else:
+                record("negotiation", _step(
+                    db, run, "negotiation_agent",
+                    lambda: run_negotiation(db, user_id, subscription_id=target_id)), "Negotiation")
+
+            # 4 — Compare the deal (if any) with catalog alternatives; propose only
+            record("switching", _step(
+                db, run, "plan_switching",
+                lambda: propose_plan_switch(db, user_id, subscription_id=target_id)), "Plan Switching")
 
         # ── Final status ─────────────────────────────────────
         attempted = len(errors) + sum(v is not None for v in outputs.values())
@@ -227,8 +236,9 @@ def run_cycle(db: Session, user_id: int, trigger: str = "api") -> Dict[str, Any]
         "user_id": user_id,
         **outputs,
         "recommendation": (
-            {k: switching[k] for k in ("recommendation_id", "current_cost",
-                                       "projected_cost", "estimated_monthly_savings")}
+            {k: switching[k] for k in ("recommendation_id", "action", "current_cost",
+                                       "projected_cost", "estimated_monthly_savings",
+                                       "explanation")}
             if final_status == "awaiting_approval" else None
         ),
         "audit_logged": [

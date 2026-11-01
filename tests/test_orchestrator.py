@@ -9,7 +9,7 @@ from tests.conftest import add_usage, approve, get_subscription, make_subscripti
 
 def _forced_deal(monkeypatch):
     """Make every negotiation end in a deal at exactly 10% off."""
-    monkeypatch.setattr(engine, "_initial_offer", lambda cost, eff: round(cost * 0.9, 2))
+    monkeypatch.setattr(engine, "_initial_offer", lambda cost, eff, rng: round(cost * 0.9, 2))
     monkeypatch.setattr(engine, "_is_accepted", lambda offer, counter: True)
 
 
@@ -198,7 +198,7 @@ def test_missing_sharing_consent_blocks_negotiation(client):
 
 
 # ── Failure containment ──────────────────────────────────────
-def test_failing_agent_is_recorded_and_dependents_skipped(client, monkeypatch):
+def test_failing_agent_is_recorded_and_independent_steps_still_run(client, monkeypatch):
     def broken(*args, **kwargs):
         raise RuntimeError("provider simulator unavailable")
 
@@ -212,7 +212,9 @@ def test_failing_agent_is_recorded_and_dependents_skipped(client, monkeypatch):
     assert data["errors"] == ["Negotiation failed: provider simulator unavailable"]
     assert steps["negotiation_agent"]["status"] == "failed"
     assert "provider simulator unavailable" in steps["negotiation_agent"]["error"]
-    assert steps["plan_switching"]["status"] == "skipped"
+    # Catalog alternatives don't depend on the negotiation, so switching still runs
+    assert steps["plan_switching"]["status"] == "completed"
+    assert data["switching"]["proposed"] is False
     assert steps["usage_analyzer"]["status"] == "completed"
     assert get_subscription(client, sub)["monthly_cost"] == 599.0
 

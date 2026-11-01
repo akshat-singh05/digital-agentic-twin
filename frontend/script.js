@@ -82,6 +82,10 @@ function fmtDateTime(iso) {
   return d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short' }) + ' ' + d.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' });
 }
 
+function pct(ratio) {
+  return ratio == null ? '—' : `${(ratio * 100).toFixed(1)}%`;
+}
+
 function effClass(eff) {
   if (eff < 0.4)  return 'low';
   if (eff <= 0.8) return 'good';
@@ -89,12 +93,17 @@ function effClass(eff) {
 }
 
 // Approve / reject controls for a proposed recommendation.
-function decisionPanel(recId, text) {
+function decisionPanel(recId, text, explanation) {
+  const list = (items, icon) => (items || []).map(i => `<div>${icon} ${esc(i)}</div>`).join('');
   return `
     <div class="result-message" id="decision-${recId}" style="border-color:var(--warning);background:var(--warning-bg)">
       <span class="msg-icon">📝</span>
       <div style="flex:1">
         <div><strong>Recommendation #${recId} awaits your decision.</strong> ${esc(text)}</div>
+        ${explanation ? `
+        <div style="margin-top:8px"><strong>${esc(explanation.what)}</strong></div>
+        <div style="margin-top:4px;color:var(--text-secondary)">${esc(explanation.why)}</div>
+        <div style="margin-top:6px">${list(explanation.benefits, '✔')}${list(explanation.drawbacks, '⚠')}</div>` : ''}
         <div style="margin-top:10px;display:flex;gap:8px">
           <button class="btn btn-primary btn-sm" onclick="decideRecommendation(${recId}, 'approve')">✅ Approve &amp; apply</button>
           <button class="btn btn-secondary btn-sm" onclick="decideRecommendation(${recId}, 'reject')">✖ Reject</button>
@@ -369,9 +378,9 @@ async function runFullCycle() {
         ${d.analysis ? `
         <div class="result-card">
           <div class="result-title">📊 Analysis</div>
-          <div class="result-value">${(d.analysis.efficiency * 100).toFixed(1)}%</div>
+          <div class="result-value">${pct(d.analysis.efficiency)}</div>
           <div class="result-sub">Efficiency · ${d.analysis.recommendation?.toUpperCase() || '—'}</div>
-          <div class="efficiency-bar-wrap"><div class="efficiency-bar"><div class="bar-fill ${effClass(d.analysis.efficiency)}" style="width:${(d.analysis.efficiency * 100)}%"></div></div></div>
+          ${d.analysis.efficiency != null ? `<div class="efficiency-bar-wrap"><div class="efficiency-bar"><div class="bar-fill ${effClass(d.analysis.efficiency)}" style="width:${Math.min(d.analysis.efficiency * 100, 100)}%"></div></div></div>` : ''}
         </div>` : ''}
         ${d.negotiation ? `
         <div class="result-card">
@@ -398,8 +407,8 @@ async function runFullCycle() {
         </div>
       </div>
       ${d.recommendation ? decisionPanel(d.recommendation.recommendation_id,
-          `Proposed: ₹${d.recommendation.current_cost} → ₹${d.recommendation.projected_cost} ` +
-          `(save ₹${d.recommendation.estimated_monthly_savings}/month). Negotiated with the built-in provider simulator.`) : ''}
+          `₹${d.recommendation.current_cost} → ₹${d.recommendation.projected_cost} ` +
+          `(save ₹${d.recommendation.estimated_monthly_savings}/month).`, d.recommendation.explanation) : ''}
       ${d.errors ? `<div class="result-message" style="border-color:var(--warning);background:var(--warning-bg)"><span class="msg-icon">⚠️</span>${d.errors.map(esc).join('<br>')}</div>` : ''}
     `;
 
@@ -782,20 +791,20 @@ async function runAnalysis() {
     $('analysisResult').innerHTML = `
       <div class="result-grid">
         <div class="result-card">
-          <div class="result-title">Efficiency Score</div>
-          <div class="result-value">${(d.efficiency * 100).toFixed(1)}%</div>
-          <div class="efficiency-bar-wrap"><div class="efficiency-bar"><div class="bar-fill ${effClass(d.efficiency)}" style="width:${d.efficiency * 100}%"></div></div></div>
-          <div class="result-sub">Usage Category: ${d.usage_category || '—'}</div>
+          <div class="result-title">Utilisation (${esc(d.binding_metric || 'n/a')})</div>
+          <div class="result-value">${pct(d.efficiency)}</div>
+          ${d.efficiency != null ? `<div class="efficiency-bar-wrap"><div class="efficiency-bar"><div class="bar-fill ${effClass(d.efficiency)}" style="width:${Math.min(d.efficiency * 100, 100)}%"></div></div></div>` : ''}
+          <div class="result-sub">Data ${pct(d.data_utilization)} · Calls ${pct(d.call_utilization)} · ${esc(d.usage_category || '—')}</div>
         </div>
         <div class="result-card">
           <div class="result-title">Recommendation</div>
-          <div class="result-value" style="font-size:1.4rem">${(d.recommendation || '—').toUpperCase()}</div>
-          <div class="result-sub">Confidence: ${((d.confidence_score || 0) * 100).toFixed(0)}%</div>
+          <div class="result-value" style="font-size:1.4rem">${esc((d.recommendation || '—').toUpperCase())}</div>
+          <div class="result-sub">Confidence: ${((d.confidence_score || 0) * 100).toFixed(0)}% · ${d.periods || 0} periods</div>
         </div>
         <div class="result-card">
-          <div class="result-title">Savings Estimate</div>
-          <div class="result-value" style="color:var(--success)">₹${d.savings_estimate || 0}</div>
-          <div class="result-sub">Per month potential saving</div>
+          <div class="result-title">Unused Spend</div>
+          <div class="result-value">₹${d.unused_spend || 0}</div>
+          <div class="result-sub">Paying for capacity you don't use — not a saving</div>
         </div>
         <div class="result-card">
           <div class="result-title">Current Plan</div>
@@ -805,12 +814,19 @@ async function runAnalysis() {
       </div>
       <div class="result-grid" style="margin-top:16px">
         <div class="result-card">
-          <div class="result-title">Avg Data Usage</div>
+          <div class="result-title">Data Usage</div>
           <div class="result-value">${d.avg_data_usage || 0} GB</div>
+          <div class="result-sub">Peak ${d.peak_data_usage || 0} GB · trend ${esc(d.data_trend || '—')} · next month ~${d.projected_data_usage || 0} GB</div>
         </div>
         <div class="result-card">
-          <div class="result-title">Avg Call Usage</div>
+          <div class="result-title">Call Usage</div>
           <div class="result-value">${d.avg_call_usage || 0} min</div>
+          <div class="result-sub">Peak ${d.peak_call_usage || 0} min</div>
+        </div>
+        <div class="result-card">
+          <div class="result-title">Overage Billed</div>
+          <div class="result-value">₹${d.avg_overage || 0}</div>
+          <div class="result-sub">Average per month above the plan price</div>
         </div>
       </div>
       ${d.message ? `<div class="result-message"><span class="msg-icon">💬</span>${esc(d.message)}</div>` : ''}
@@ -885,7 +901,7 @@ async function runNegotiation() {
         <div class="result-card">
           <div class="result-title">Outcome</div>
           <div class="result-value">${outcomeBadge}</div>
-          <div class="result-sub">Efficiency used: ${((d.efficiency_used || 0) * 100).toFixed(1)}%</div>
+          <div class="result-sub">Efficiency used: ${pct(d.efficiency_used)} · walk-away ₹${d.reservation_price}${d.best_alternative ? ` (${esc(d.best_alternative.plan_name)})` : ''}</div>
         </div>
       </div>
 
@@ -978,7 +994,7 @@ async function runSwitch() {
         </div>
       </div>
       ${d.reason ? `<div class="result-message"><span class="msg-icon">💬</span>${esc(d.reason)}</div>` : ''}
-      ${d.proposed ? decisionPanel(d.recommendation_id, `Save ₹${d.estimated_monthly_savings}/month if approved.`) : ''}
+      ${d.proposed ? decisionPanel(d.recommendation_id, `Save ₹${d.estimated_monthly_savings}/month if approved.`, d.explanation) : ''}
     `;
     toast('info', 'Evaluation Complete', d.proposed ? 'Change proposed — awaiting your approval.' : 'No change proposed.');
   } catch (e) {

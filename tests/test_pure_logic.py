@@ -84,20 +84,21 @@ def test_high_sla_risk_is_rejected():
 
 
 # ── Usage Analyzer target selection ──────────────────────────
-def test_optimization_target_is_largest_underutilized_opportunity():
+def test_optimization_target_is_largest_amount_at_stake():
     analyses = [
-        {"subscription_id": 1, "recommendation": "keep", "savings_estimate": 900},
-        {"subscription_id": 2, "recommendation": "downgrade", "savings_estimate": 100},
-        {"subscription_id": 3, "recommendation": "downgrade", "savings_estimate": 300},
-        {"subscription_id": 4, "recommendation": "no_data", "savings_estimate": 0},
+        {"subscription_id": 1, "recommendation": "keep", "unused_spend": 900, "avg_overage": 0},
+        {"subscription_id": 2, "recommendation": "downgrade", "unused_spend": 100, "avg_overage": 0},
+        {"subscription_id": 3, "recommendation": "downgrade", "unused_spend": 300, "avg_overage": 0},
+        {"subscription_id": 4, "recommendation": "upgrade", "unused_spend": 0, "avg_overage": 450},
+        {"subscription_id": 5, "recommendation": "no_data", "unused_spend": 0, "avg_overage": 0},
     ]
-    assert pick_optimization_target(analyses)["subscription_id"] == 3
+    assert pick_optimization_target(analyses)["subscription_id"] == 4
 
 
-def test_no_optimization_target_without_underutilized_plan():
+def test_overutilized_plan_without_overage_is_not_a_target():
     analyses = [
-        {"subscription_id": 1, "recommendation": "keep", "savings_estimate": 200},
-        {"subscription_id": 2, "recommendation": "upgrade", "savings_estimate": 0},
+        {"subscription_id": 1, "recommendation": "keep", "unused_spend": 200, "avg_overage": 0},
+        {"subscription_id": 2, "recommendation": "upgrade", "unused_spend": 0, "avg_overage": 0},
     ]
     assert pick_optimization_target(analyses) is None
     assert pick_optimization_target([]) is None

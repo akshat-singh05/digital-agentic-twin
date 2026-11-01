@@ -38,12 +38,15 @@ It analyzes usage patterns, protects user privacy (consent gates + differential 
 ## ✨ Features
 
 ### 1. 📊 Usage Analyzer
-Evaluates subscription utilization across all active plans using rule-based efficiency scoring.
+Measures every active subscription from its actual usage records (rule-based, deterministic).
 
-- Multi-subscription comparison with best-plan recommendation
-- Efficiency categories: `underutilized` / `optimal` / `overutilized`
-- Confidence scoring based on available billing history (ramps to 1.0 after 6 months)
-- Savings estimation for underutilized plans
+- Utilisation of **data and call minutes**; the higher one is the binding constraint
+- Average and **peak** usage, month-over-month **trend** and next-month **projection**
+- **Overage** actually billed above the plan price (since the last price change)
+- Categories: `underutilized` / `optimal` / `overutilized`; a downgrade is held back when usage is rising toward the threshold; plans with no cap are `no_metric`
+- `unused_spend`: what you pay for capacity you don't use — an indicator, *not* a saving
+- Confidence from history length (full at 6 periods) and usage stability
+- Picks the subscription with the most ₹/month at stake (unused spend, or overage)
 
 ### 2. 🔒 Privacy-Preserving Mediator
 Applies differential privacy (Laplace mechanism) to sanitize sensitive usage data before processing.
@@ -53,17 +56,20 @@ Applies differential privacy (Laplace mechanism) to sanitize sensitive usage dat
 - Zero-clamping to prevent negative values
 - Raw data never leaves the privacy boundary
 
-### 3. 🤝 Autonomous Negotiation Agent
-Simulates multi-round price negotiation between the user's digital twin and the service provider.
+### 3. 🤝 Negotiation Agent (simulated provider)
+Multi-round price negotiation against a **built-in provider simulator** — there is no real provider.
 
-- 3–5 round offer–counteroffer sessions
-- Strategy adapts to utilization (aggressive for underutilized, gentle for optimal)
-- Acceptance threshold: ≤ 3% gap between offers
-- Full round history persisted for transparency
+- **Walk-away price**: never agrees to pay more than 95% of today's price, or more than the best catalog alternative costs (the user's BATNA)
+- Strategy adapts to utilisation; deal when within 3% and at or below the walk-away price
+- **Reproducible**: seeded per subscription and session, so every outcome can be replayed
+- Runs only for underutilized plans; full round history persisted
 
 ### 4. 🔄 Plan Switching with Approval and Rollback
-Validates negotiated deals using KPI thresholds and SLA risk, then **proposes** them as recommendations.
+Compares the negotiated price with the best **catalog alternative** and **proposes** the bigger saving.
 
+- **Alternatives**: catalog plans must cover peak/projected usage + 10% headroom and respect the user's preferences (budget, minimum data/minutes, required features, provider rules); every excluded plan comes with its reasons (`GET /api/subscriptions/{id}/alternatives`)
+- **Savings** are measured against the effective current cost (price + average overage), so a bigger plan can be the cheaper option
+- **Explanation** on every proposal: what, why, benefits, drawbacks, and the usage data used
 - **Cost validation**: downgrade must save ≥ 5%; paying the same or more needs more capacity
 - **SLA risk**: low / medium / high based on data + call limit proximity
 - **Approval**: a recommendation is applied only when the user approves it (needs `execute_plan_changes` consent); it expires if the plan changed in the meantime
@@ -202,13 +208,14 @@ underutilized they are skipped (`"skipped"` in the response). A switch is only e
 | `POST` | `/api/usage` | Ingest a usage record (linked to the user's subscription with that provider, or an explicit `subscription_id`) |
 | `GET` | `/api/usage/user/{user_id}` | List user's usage records |
 | `GET` | `/api/subscriptions/{sub_id}/history` | Every applied change to a subscription |
+| `GET` | `/api/subscriptions/{sub_id}/alternatives` | Catalog plans that fit, best saving first, and why the rest don't (consent: `usage_analysis`) |
 | `GET` / `PUT` | `/api/users/{user_id}/preferences` | Budget, minimum data/minutes, required features, provider rules |
 | `GET` | `/api/users/{user_id}/consents` | Every consent scope and whether it is granted (default: denied) |
 | `PUT` | `/api/users/{user_id}/consents/{scope}` | Grant or revoke one scope (audited) |
 | `GET` | `/api/plans` | Plan catalog, cheapest first (`?provider=`, `?category=`) |
 
 > The seeded catalog is **demo data** (`source: "demo_seed"`), not live provider pricing.
-> Consents are enforced by every agent (default: denied). Preferences are stored but not yet used in scoring.
+> Consents are enforced by every agent (default: denied). Preferences constrain which catalog plans are recommended.
 
 ### Intelligent Modules
 
@@ -273,7 +280,9 @@ pip install -r requirements.txt
 python seed_data.py --reset
 ```
 
-This creates 5 users, ~12 subscriptions, and ~54 usage records with realistic data.
+This creates the demo plan catalog, 5 users with subscriptions and usage history, and full
+consent for the demo users. The data is generated from a fixed seed (`--random-seed`, default
+42), so every reset builds the same dataset.
 
 ### 5. Start the server
 
@@ -308,7 +317,7 @@ The suite uses a throwaway SQLite database and needs no running server.
 ### Run the Full Pipeline (Single Click)
 
 ```bash
-curl -X POST http://127.0.0.1:8000/api/run-cycle/1
+curl -X POST http://127.0.0.1:8000/api/run-cycle/2   # seeded user 2
 ```
 
 **Response** (abridged):
@@ -317,12 +326,12 @@ curl -X POST http://127.0.0.1:8000/api/run-cycle/1
   "status": "success",
   "data": {
     "run_id": 1,
-    "user_id": 1,
-    "analysis": { "recommendation": "downgrade", "efficiency": 0.27, "optimization_target": { "subscription_id": 2 } },
+    "user_id": 2,
+    "analysis": { "recommendation": "downgrade", "efficiency": 0.195, "binding_metric": "calls", "optimization_target": { "subscription_id": 4 } },
     "sanitization": { "sanitized_usage": [] },
-    "negotiation": { "status": "accepted", "final_price": 667.27, "savings_pct": 16.49, "simulated": true },
-    "switching": { "proposed": true, "recommendation_id": 2, "risk_flag": "low", "projected_cost": 667.27 },
-    "recommendation": { "recommendation_id": 2, "current_cost": 799.0, "projected_cost": 667.27, "estimated_monthly_savings": 131.73 },
+    "negotiation": { "status": "final", "reservation_price": 449.0, "best_alternative": { "plan_name": "Hero 449" }, "simulated": true },
+    "switching": { "proposed": true, "action": "switch_plan", "recommendation_id": 1, "proposed_plan": { "plan_name": "Hero 449" }, "risk_flag": "low" },
+    "recommendation": { "recommendation_id": 1, "action": "switch_plan", "current_cost": 599.0, "projected_cost": 449.0, "estimated_monthly_savings": 150.0, "explanation": { "what": "Switch from Vi Max 599 to Vi Hero 449 at ₹449.0/month.", "benefits": ["..."], "drawbacks": ["..."] } },
     "audit_logged": ["analysis", "negotiation", "switching"],
     "skipped": null,
     "errors": null,

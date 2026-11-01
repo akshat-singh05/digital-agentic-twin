@@ -3,9 +3,14 @@ Plan Switching Service — proposes plan changes and executes approved ones.
 
 The agent never changes a subscription on its own:
 
-  propose_plan_switch()    → evaluates the latest negotiation against the
-                             KPI rules; if it passes, writes a
-                             Recommendation (status "proposed").
+  find_alternatives()      → catalog plans that fit the user's measured
+                             usage and preferences (pure ranking in
+                             alternatives.py), with reasons for the rest.
+  propose_plan_switch()    → compares the negotiated price (if a fresh deal
+                             exists) with the best catalog alternative,
+                             checks both against the KPI rules, and proposes
+                             the larger saving as a Recommendation with a
+                             structured explanation (status "proposed").
   approve_recommendation() → user decision; needs the
                              ``execute_plan_changes`` consent, re-validates,
                              then applies the change atomically.
@@ -14,143 +19,179 @@ The agent never changes a subscription on its own:
                              change (needs ``execute_plan_changes``).
 
 Integrates:
+  - Usage Analyzer → measured usage profile
+  - Plan catalog + user preferences → alternatives
   - Negotiation History → the agreed negotiated price
   - Plan Switching Executor → pure KPI validation
-  - Privacy Mediator → consent gate for execution
+  - Privacy Mediator → consent gates
   - Audit Logger → every proposal, decision and change
   - transactional() → atomic commit / rollback
 """
 
 import json
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from sqlalchemy.orm import Session
 
 from app.core.errors import ConflictError
 from app.core.run_context import current_run_id
-from app.models import NegotiationHistory, PlanHistory, Recommendation, Subscription
-from app.services.user_service import require_user
+from app.models import NegotiationHistory, PlanCatalog, PlanHistory, Recommendation, Subscription
 from app.services.base_service import save, transactional
+from app.services.catalog_service import list_plans
 from app.services.recommendation_service import pending_recommendation, require_recommendation
+from app.services.user_service import get_preferences, require_user
 from app.modules.audit_logger.service import build_audit_log
+from app.modules.plan_switching.alternatives import describe_tradeoffs, rank_alternatives
 from app.modules.plan_switching.executor import MINIMUM_SAVINGS_PCT, evaluate_switch
 from app.modules.privacy_mediator.service import require_consent
-from app.modules.usage_analyzer.service import get_usage_for_subscription
+from app.modules.usage_analyzer.service import (
+    analyze_subscription, find_optimization_target, get_usage_for_subscription,
+)
 
 _AGENT = "plan_switching"
+_PROFILE_KEYS = (
+    "periods", "avg_data_usage", "peak_data_usage", "projected_data_usage", "data_trend",
+    "avg_call_usage", "peak_call_usage", "projected_call_usage", "avg_overage",
+    "efficiency", "binding_metric", "confidence_score",
+)
 
 
 # ─────────────────────────────────────────────────────────────
 # Internal helpers
 # ─────────────────────────────────────────────────────────────
-def _get_target_and_negotiation(
-    db: Session, user_id: int, subscription_id: Optional[int]
-) -> Tuple[Subscription, NegotiationHistory]:
-    """
-    Return the subscription to switch and the last round of its most
-    recent negotiation.
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
 
-    Without ``subscription_id`` the user's most recently negotiated active
-    subscription is used.
 
-    Raises:
-        ValueError:    If the given subscription is not the user's active one.
-        ConflictError: If no negotiation result exists.
-    """
-    query = (
-        db.query(NegotiationHistory)
-        .join(Subscription, NegotiationHistory.subscription_id == Subscription.id)
-        .filter(Subscription.user_id == user_id, Subscription.is_active == True)
+def _require_active_subscription(db: Session, user_id: int, subscription_id: int) -> Subscription:
+    sub = (
+        db.query(Subscription)
+        .filter(
+            Subscription.id == subscription_id,
+            Subscription.user_id == user_id,
+            Subscription.is_active == True,
+        )
+        .first()
     )
-
-    if subscription_id is not None:
-        sub = (
-            db.query(Subscription)
-            .filter(
-                Subscription.id == subscription_id,
-                Subscription.user_id == user_id,
-                Subscription.is_active == True,
-            )
-            .first()
-        )
-        if not sub:
-            raise ValueError(
-                f"No active subscription {subscription_id} found for user {user_id}"
-            )
-        query = query.filter(Subscription.id == subscription_id)
-
-    # Rounds of one session share a commit timestamp, so order by id.
-    negotiation = query.order_by(NegotiationHistory.id.desc()).first()
-    if not negotiation:
-        raise ConflictError(
-            f"No negotiation result found for user {user_id}. Run a negotiation first."
-        )
-    return negotiation.subscription, negotiation
+    if not sub:
+        raise ValueError(f"No active subscription {subscription_id} found for user {user_id}")
+    return sub
 
 
-def _get_recent_usage_stats(db: Session, subscription: Subscription) -> Dict[str, Any]:
-    """
-    Compute average usage stats from the last 6 billing periods.
-    """
-    records = get_usage_for_subscription(db, subscription, limit=6)
-
-    if not records:
-        return {"avg_data_used_gb": 0.0, "avg_call_minutes": 0.0, "periods": 0}
-
-    avg_data = sum(r.data_used_gb or 0 for r in records) / len(records)
-    avg_calls = sum(r.call_minutes_used or 0 for r in records) / len(records)
-
+def _plan_terms(sub: Subscription) -> Dict[str, Any]:
     return {
-        "avg_data_used_gb": round(avg_data, 2),
-        "avg_call_minutes": round(avg_calls, 2),
-        "periods": len(records),
-    }
-
-
-def _snapshot_plan(sub: Subscription) -> str:
-    """Create a JSON snapshot of the current plan for rollback."""
-    return json.dumps({
+        "provider": sub.provider,
         "plan_name": sub.plan_name,
         "monthly_cost": sub.monthly_cost,
         "data_limit_gb": sub.data_limit_gb,
         "call_minutes_limit": sub.call_minutes_limit,
         "features": sub.features,
-    })
+        "catalog_plan_id": sub.catalog_plan_id,
+    }
 
 
-def _build_proposed_plan(
-    subscription: Subscription,
-    negotiation: NegotiationHistory,
+def _snapshot_plan(sub: Subscription) -> str:
+    """JSON snapshot of the plan's terms (for history and rollback)."""
+    return json.dumps(_plan_terms(sub))
+
+
+def _subscription_category(db: Session, sub: Subscription) -> Optional[str]:
+    """Category from the linked catalog plan, else from the provider's catalog plans."""
+    if sub.catalog_plan is not None:
+        return sub.catalog_plan.category
+    plan = db.query(PlanCatalog).filter(PlanCatalog.provider == sub.provider).first()
+    return plan.category if plan else None
+
+
+def _get_recent_usage_stats(db: Session, subscription: Subscription) -> Dict[str, Any]:
+    """Average usage over the last 6 billing periods (for SLA risk)."""
+    records = get_usage_for_subscription(db, subscription, limit=6)
+    if not records:
+        return {"avg_data_used_gb": 0.0, "avg_call_minutes": 0.0, "periods": 0}
+    return {
+        "avg_data_used_gb": round(sum(r.data_used_gb or 0 for r in records) / len(records), 2),
+        "avg_call_minutes": round(sum(r.call_minutes_used or 0 for r in records) / len(records), 2),
+        "periods": len(records),
+    }
+
+
+def _fresh_negotiation(db: Session, sub: Subscription) -> Optional[NegotiationHistory]:
+    """
+    The last round of the latest negotiation for the subscription's
+    *current* terms — a negotiation older than the last plan change was
+    about a different price and is ignored.
+    """
+    neg = (
+        db.query(NegotiationHistory)
+        .filter(NegotiationHistory.subscription_id == sub.id)
+        .order_by(NegotiationHistory.id.desc())   # rounds share timestamps; id is ordered
+        .first()
+    )
+    last_change = (
+        db.query(PlanHistory)
+        .filter(PlanHistory.subscription_id == sub.id)
+        .order_by(PlanHistory.id.desc())
+        .first()
+    )
+    if neg and last_change and neg.created_at <= last_change.created_at:
+        return None
+    return neg
+
+
+def _risk_drawback(risk_flag: str) -> List[str]:
+    if risk_flag == "medium":
+        return ["Average usage is within 15% of the new limit (medium SLA risk)."]
+    return []
+
+
+# ─────────────────────────────────────────────────────────────
+# Public API — alternatives
+# ─────────────────────────────────────────────────────────────
+def find_alternatives(
+    db: Session, user_id: int, subscription: Subscription,
+    analysis: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
-    Build the proposed plan dict from an accepted negotiation round.
-
-    The agreed price (the agent offer the provider accepted) replaces the
-    current cost; limits stay as-is (same plan tier, just cheaper).
+    Rank catalog plans for a subscription against measured usage and the
+    user's preferences.  Reads usage, so callers must hold the
+    ``usage_analysis`` consent.
     """
+    analysis = analysis or analyze_subscription(db, user_id, subscription)
+    current = {**_plan_terms(subscription), "category": _subscription_category(db, subscription)}
+    catalog = [
+        {
+            "id": p.id, "provider": p.provider, "plan_name": p.plan_name,
+            "category": p.category, "monthly_cost": p.monthly_cost,
+            "data_limit_gb": p.data_limit_gb, "call_minutes_limit": p.call_minutes_limit,
+            "features": p.features, "source": p.source,
+        }
+        for p in list_plans(db)
+    ]
+    result = rank_alternatives(
+        current, catalog, analysis, get_preferences(db, user_id), MINIMUM_SAVINGS_PCT,
+    )
     return {
-        "provider": subscription.provider,
-        "plan_name": subscription.plan_name,
-        "monthly_cost": negotiation.agent_offer,
-        "data_limit_gb": subscription.data_limit_gb,
-        "call_minutes_limit": subscription.call_minutes_limit,
+        "subscription_id": subscription.id,
+        "current_plan": current,
+        "usage_profile": {k: analysis.get(k) for k in _PROFILE_KEYS},
+        **result,
     }
 
 
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
+def get_alternatives(db: Session, subscription_id: int) -> Dict[str, Any]:
+    """
+    Alternatives for a subscription (API entry point).
 
-
-def _recommendation_out(rec: Recommendation) -> Dict[str, Any]:
-    return {
-        "recommendation_id": rec.id,
-        "status": rec.status,
-        "subscription_id": rec.subscription_id,
-        "current_cost": rec.current_cost,
-        "proposed_cost": rec.proposed_cost,
-        "estimated_monthly_savings": rec.estimated_monthly_savings,
-    }
+    Raises:
+        ValueError:           If the subscription does not exist.
+        ConsentRequiredError: If ``usage_analysis`` is not granted.
+    """
+    sub = db.get(Subscription, subscription_id)
+    if sub is None:
+        raise ValueError(f"Subscription with id {subscription_id} not found")
+    require_consent(db, sub.user_id, "usage_analysis", _AGENT)
+    return find_alternatives(db, sub.user_id, sub)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -160,32 +201,35 @@ def propose_plan_switch(
     db: Session, user_id: int, subscription_id: Optional[int] = None
 ) -> Dict[str, Any]:
     """
-    Evaluate the latest negotiation and, if it passes the KPI rules,
-    propose it as a Recommendation awaiting the user's approval.
+    Decide whether a change is worth proposing for one subscription.
 
-    Nothing about the subscription changes here.
+    Options considered (each must pass the KPI rules):
+      A. the negotiated price on the current plan — only a fresh,
+         *accepted* deal counts;
+      B. the best-fitting catalog alternative.
+    The option with the larger monthly saving becomes a Recommendation
+    awaiting the user's approval.  Nothing about the subscription changes.
 
-    Steps:
-        1. Validate user exists.
-        2. Fetch the target subscription and its latest negotiation round.
-        3. Refuse if a proposal for it already awaits a decision.
-        4. No agreement → not proposed.  Otherwise evaluate (KPI + risk).
-        5. Within one transaction: write the Recommendation (if approved
-           by the rules) and the audit entry.
-
-    Returns:
-        Dict with proposed, recommendation_id, reason, projected_cost, …
+    Without ``subscription_id`` the analyzer's optimization target is used.
 
     Raises:
-        ValueError:    If user or subscription not found.
-        ConflictError: If no negotiation exists or a proposal is pending.
+        ValueError:           If user or subscription not found.
+        ConflictError:        If there is nothing to optimize or a
+                              proposal is already pending.
+        ConsentRequiredError: If ``usage_analysis`` is not granted.
     """
-    # Step 1 / 2 — User, target subscription, latest negotiation round
+    # 1 — User, consent, target subscription
     require_user(db, user_id)
-    subscription, negotiation = _get_target_and_negotiation(db, user_id, subscription_id)
-    current_cost = subscription.monthly_cost
+    require_consent(db, user_id, "usage_analysis", _AGENT)
+    if subscription_id is not None:
+        subscription = _require_active_subscription(db, user_id, subscription_id)
+    else:
+        target = find_optimization_target(db, user_id)
+        if target is None:
+            raise ConflictError(f"No subscription with an optimization opportunity for user {user_id}")
+        subscription = db.get(Subscription, target["subscription_id"])
 
-    # Step 3 — One open proposal per subscription
+    # 2 — One open proposal per subscription
     pending = pending_recommendation(db, subscription.id)
     if pending is not None:
         raise ConflictError(
@@ -193,68 +237,134 @@ def propose_plan_switch(
             f"is awaiting your decision"
         )
 
-    # Step 4 — Only an accepted deal has a price both sides agreed to
+    analysis = analyze_subscription(db, user_id, subscription)
     usage_stats = _get_recent_usage_stats(db, subscription)
+    current = _plan_terms(subscription)
+    current_cost = subscription.monthly_cost
+    options, notes = [], []
 
-    if negotiation.status != "accepted":
-        proposed_cost = current_cost
-        evaluation = {
-            "approved": False,
-            "reason": (
-                f"Switch rejected: negotiation ended without agreement "
-                f"(provider's final counter ₹{negotiation.provider_counter}). "
-                f"Current plan kept at ₹{current_cost}."
-            ),
-            "projected_cost": current_cost,
-            "risk_flag": "not_assessed",
-        }
+    # 3A — Negotiated price on the current plan
+    negotiation = _fresh_negotiation(db, subscription)
+    if negotiation is None:
+        notes.append("No negotiated price for the current terms.")
+    elif negotiation.status != "accepted":
+        notes.append(
+            f"Switch rejected: negotiation ended without agreement "
+            f"(provider's final counter ₹{negotiation.provider_counter})."
+        )
     else:
-        current_plan = {
-            "provider": subscription.provider,
-            "plan_name": subscription.plan_name,
-            "monthly_cost": current_cost,
-            "data_limit_gb": subscription.data_limit_gb,
-            "call_minutes_limit": subscription.call_minutes_limit,
-        }
-        proposed_plan = _build_proposed_plan(subscription, negotiation)
-        proposed_cost = proposed_plan["monthly_cost"]
-        evaluation = evaluate_switch(current_plan, proposed_plan, usage_stats)
+        proposed = {**current, "monthly_cost": negotiation.agent_offer}
+        ev = evaluate_switch(current, proposed, usage_stats)
+        if not ev["approved"]:
+            notes.append(ev["reason"])
+        else:
+            savings = round(current_cost - negotiation.agent_offer, 2)
+            options.append({
+                "action": "apply_negotiated_price",
+                "proposed_cost": negotiation.agent_offer,
+                "monthly_savings": savings,
+                "evaluation": ev,
+                "plan": None,
+                "what": (
+                    f"Keep {subscription.provider} {subscription.plan_name} at the negotiated "
+                    f"price ₹{negotiation.agent_offer} instead of ₹{current_cost}."
+                ),
+                "benefits": [
+                    f"Saves ₹{savings}/month ({round(savings / current_cost * 100, 2)}%).",
+                    "Same plan, limits and features.",
+                ],
+                "drawbacks": [
+                    "The price comes from the built-in provider simulator — a real "
+                    "provider would have to confirm it."
+                ] + _risk_drawback(ev["risk_flag"]),
+            })
 
-    savings = round(current_cost - proposed_cost, 2)
+    # 3B — Best catalog alternative that also passes the KPI rules
+    alternatives = find_alternatives(db, user_id, subscription, analysis)
+    for alt in alternatives["fits"]:
+        ev = evaluate_switch(current, alt, usage_stats)
+        if not ev["approved"]:
+            continue
+        tradeoffs = describe_tradeoffs(current, alt, analysis)
+        options.append({
+            "action": "switch_plan",
+            "proposed_cost": alt["monthly_cost"],
+            "monthly_savings": alt["monthly_savings"],
+            "evaluation": ev,
+            "plan": alt,
+            "what": (
+                f"Switch from {subscription.provider} {subscription.plan_name} to "
+                f"{alt['provider']} {alt['plan_name']} at ₹{alt['monthly_cost']}/month."
+            ),
+            "benefits": tradeoffs["benefits"],
+            "drawbacks": tradeoffs["drawbacks"] + _risk_drawback(ev["risk_flag"]),
+        })
+        break
+    else:
+        n_excluded = len(alternatives["excluded"])
+        if n_excluded:
+            first = alternatives["excluded"][0]
+            notes.append(
+                f"No catalog plan fits ({n_excluded} checked; e.g. {first['plan_name']}: "
+                f"{first['reasons'][0]})."
+            )
+        else:
+            notes.append("No comparable catalog plan.")
 
-    # Step 5 — Persist proposal + audit entry atomically
+    chosen = max(options, key=lambda o: o["monthly_savings"]) if options else None
+    considered = [
+        {"action": o["action"], "proposed_cost": o["proposed_cost"],
+         "monthly_savings": o["monthly_savings"],
+         "plan_name": o["plan"]["plan_name"] if o["plan"] else subscription.plan_name}
+        for o in options
+    ]
+
+    # 4 — Persist proposal + audit entry atomically
     rec = None
+    explanation = None
     with transactional(db):
-        if evaluation["approved"]:
+        if chosen is not None:
+            ev = chosen["evaluation"]
+            explanation = {
+                "what": chosen["what"],
+                "why": f"{analysis['message']} {ev['reason']}",
+                "benefits": chosen["benefits"],
+                "drawbacks": chosen["drawbacks"],
+                "data_used": {k: analysis.get(k) for k in _PROFILE_KEYS},
+                "requires_approval": True,
+            }
             rec = save(db, Recommendation(
                 user_id=user_id,
                 subscription_id=subscription.id,
                 run_id=current_run_id.get(),
-                action="apply_negotiated_price",
+                proposed_plan_id=chosen["plan"]["plan_id"] if chosen["plan"] else None,
+                action=chosen["action"],
                 current_cost=current_cost,
-                proposed_cost=proposed_cost,
-                estimated_monthly_savings=savings,
-                rationale=(
-                    f"{evaluation['reason']} Same plan and limits; only the price changes. "
-                    f"The price comes from the built-in provider simulator — a real "
-                    f"provider would have to confirm it."
-                ),
+                proposed_cost=chosen["proposed_cost"],
+                estimated_monthly_savings=chosen["monthly_savings"],
+                rationale=" ".join([chosen["what"], explanation["why"]] + chosen["drawbacks"][:1]),
                 evidence=json.dumps({
-                    "negotiation_round_id": negotiation.id,
-                    "negotiation_status": negotiation.status,
-                    "risk_flag": evaluation["risk_flag"],
+                    "explanation": explanation,
+                    "current_plan": current,
+                    "options_considered": considered,
+                    "alternatives_excluded": [
+                        {"plan_name": a["plan_name"], "reasons": a["reasons"]}
+                        for a in alternatives["excluded"][:5]
+                    ],
+                    "risk_flag": ev["risk_flag"],
                     "minimum_savings_pct": MINIMUM_SAVINGS_PCT,
                     "usage_stats": usage_stats,
-                    "limits": {
-                        "data_limit_gb": subscription.data_limit_gb,
-                        "call_minutes_limit": subscription.call_minutes_limit,
-                    },
-                    "simulated_negotiation": True,
+                    "negotiation_round_id": negotiation.id if negotiation else None,
+                    "simulated_negotiation": chosen["action"] == "apply_negotiated_price",
                 }),
                 requires_approval=True,
                 status="proposed",
             ))
 
+        reason = (
+            chosen["evaluation"]["reason"] if chosen
+            else " ".join(notes)
+        )
         save(db, build_audit_log(db, user_id, "switching", {
             "subscription_id": subscription.id,
             "provider": subscription.provider,
@@ -262,23 +372,29 @@ def propose_plan_switch(
             "applied": False,
             "proposed": rec is not None,
             "recommendation_id": rec.id if rec else None,
-            "reason": evaluation["reason"],
+            "action": chosen["action"] if chosen else None,
+            "proposed_plan_name": chosen["plan"]["plan_name"] if chosen and chosen["plan"] else None,
+            "reason": reason,
             "previous_cost": current_cost,
-            "proposed_cost": proposed_cost,
-            "risk_flag": evaluation["risk_flag"],
-            "negotiation_status": negotiation.status,
-            "usage_stats": usage_stats,
+            "proposed_cost": chosen["proposed_cost"] if chosen else current_cost,
+            "monthly_savings": chosen["monthly_savings"] if chosen else 0,
+            "risk_flag": chosen["evaluation"]["risk_flag"] if chosen else "not_assessed",
+            "options_considered": considered,
         }))
 
     return {
         "proposed": rec is not None,
         "recommendation_id": rec.id if rec else None,
         "requires_approval": rec is not None,
-        "reason": evaluation["reason"],
+        "action": chosen["action"] if chosen else None,
+        "reason": reason,
         "current_cost": current_cost,
-        "projected_cost": evaluation["projected_cost"],
-        "estimated_monthly_savings": savings if rec else 0.0,
-        "risk_flag": evaluation["risk_flag"],
+        "projected_cost": chosen["proposed_cost"] if chosen else current_cost,
+        "estimated_monthly_savings": chosen["monthly_savings"] if chosen else 0.0,
+        "risk_flag": chosen["evaluation"]["risk_flag"] if chosen else "not_assessed",
+        "proposed_plan": chosen["plan"] if chosen else None,
+        "options_considered": considered,
+        "explanation": explanation,
         "subscription_id": subscription.id,
         "provider": subscription.provider,
         "plan_name": subscription.plan_name,
@@ -293,12 +409,42 @@ def _require_proposed(rec: Recommendation) -> None:
         raise ConflictError(f"Recommendation #{rec.id} is already {rec.status}")
 
 
+def _recommendation_out(rec: Recommendation) -> Dict[str, Any]:
+    return {
+        "recommendation_id": rec.id,
+        "status": rec.status,
+        "action": rec.action,
+        "subscription_id": rec.subscription_id,
+        "current_cost": rec.current_cost,
+        "proposed_cost": rec.proposed_cost,
+        "estimated_monthly_savings": rec.estimated_monthly_savings,
+    }
+
+
+def _stale_reason(rec: Recommendation) -> Optional[str]:
+    """Why the recommendation can no longer be applied as proposed, if it can't."""
+    sub = rec.subscription
+    if not sub.is_active:
+        return "the subscription is no longer active"
+    proposed_terms = json.loads(rec.evidence or "{}").get("current_plan", {})
+    if sub.monthly_cost != rec.current_cost or (
+        proposed_terms and sub.plan_name != proposed_terms.get("plan_name")
+    ):
+        return "the subscription changed after the proposal was made"
+    if rec.action == "switch_plan":
+        plan = rec.proposed_plan
+        if plan is None or not plan.is_available or plan.monthly_cost != rec.proposed_cost:
+            return "the proposed catalog plan changed or is no longer available"
+    return None
+
+
 def approve_recommendation(db: Session, recommendation_id: int) -> Dict[str, Any]:
     """
     Approve a proposed recommendation and apply it.
 
-    The subscription must still be active and at the price the proposal
-    was made against; otherwise the recommendation expires unapplied.
+    ``apply_negotiated_price`` changes the price; ``switch_plan`` moves the
+    subscription to the catalog plan's terms.  Either way the change is
+    recorded in plan_history.  A stale recommendation expires unapplied.
 
     Raises:
         ValueError:           If the recommendation does not exist.
@@ -310,29 +456,34 @@ def approve_recommendation(db: Session, recommendation_id: int) -> Dict[str, Any
     _require_proposed(rec)
     require_consent(db, rec.user_id, "execute_plan_changes", _AGENT)
 
-    subscription = rec.subscription
-    if not subscription.is_active or subscription.monthly_cost != rec.current_cost:
+    stale = _stale_reason(rec)
+    if stale:
         with transactional(db):
             rec.status = "expired"
             rec.decided_at = _now()
             save(db, build_audit_log(db, rec.user_id, "recommendation", {
-                "recommendation_id": rec.id, "status": "expired",
-                "reason": "the subscription changed after the proposal was made",
+                "recommendation_id": rec.id, "status": "expired", "reason": stale,
             }))
-        raise ConflictError(
-            f"Recommendation #{rec.id} has expired: the subscription changed "
-            f"since it was proposed"
-        )
+        raise ConflictError(f"Recommendation #{rec.id} has expired: {stale}")
 
+    subscription = rec.subscription
     previous_terms = _snapshot_plan(subscription)
     with transactional(db):
         subscription.previous_plan_snapshot = previous_terms
+        if rec.action == "switch_plan":
+            plan = rec.proposed_plan
+            subscription.provider = plan.provider
+            subscription.plan_name = plan.plan_name
+            subscription.data_limit_gb = plan.data_limit_gb
+            subscription.call_minutes_limit = plan.call_minutes_limit
+            subscription.features = plan.features
+            subscription.catalog_plan_id = plan.id
         subscription.monthly_cost = rec.proposed_cost
         db.flush()
         save(db, PlanHistory(
             subscription_id=subscription.id,
             recommendation_id=rec.id,
-            change_type="price_change",
+            change_type="plan_change" if rec.action == "switch_plan" else "price_change",
             previous_terms=previous_terms,
             new_terms=_snapshot_plan(subscription),
             previous_cost=rec.current_cost,
@@ -350,6 +501,7 @@ def approve_recommendation(db: Session, recommendation_id: int) -> Dict[str, Any
             "recommendation_id": rec.id,
             "previous_cost": rec.current_cost,
             "proposed_cost": rec.proposed_cost,
+            "monthly_savings": rec.estimated_monthly_savings,
             "risk_flag": json.loads(rec.evidence or "{}").get("risk_flag", "unknown"),
         }))
 
