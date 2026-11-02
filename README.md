@@ -24,6 +24,8 @@ It analyzes usage patterns, protects user privacy (consent gates + differential 
 
 > **Simulation notice:** there are no real provider integrations. Negotiation outcomes come from a simulator and are labelled `simulated: true`; the plan catalog is demo data.
 
+> **Why it is built this way:** see [Design decisions](docs/DESIGN.md) — the consent gate, proposals instead of actions, the walk-away price and more.
+
 ### 🎯 Key Highlights
 
 - **Orchestrated decision cycle** — one endpoint runs every agent; each run and step is recorded
@@ -271,6 +273,7 @@ digital-agentic-twin/
 │   └── utils/
 │       └── seed_data.py         # Database seeding utility
 │
+├── docs/DESIGN.md               # The ideas and decisions behind the design
 ├── frontend/                    # Dashboard (index.html, script.js, styles.css; no build step)
 ├── migrations/versions/         # Alembic schema migrations
 ├── tests/                       # pytest suite
@@ -385,8 +388,8 @@ underutilized they are skipped (`"skipped"` in the response). A switch is only e
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/your-username/agentic-digital-twin.git
-cd agentic-digital-twin
+git clone https://github.com/akshat-singh05/digital-agentic-twin.git
+cd digital-agentic-twin
 ```
 
 ### 2. Create a virtual environment (recommended)
