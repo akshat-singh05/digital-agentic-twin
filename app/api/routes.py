@@ -41,6 +41,8 @@ from app.schemas import (
     SubscriptionCreate,
     SubscriptionOut,
     UsageDataCreate,
+    UsageImportRequest,
+    PlanImportRequest,
     UsageDataOut,
     NegotiationRoundOut,
     AuditLogOut,
@@ -64,6 +66,7 @@ from app.modules.plan_switching.service import (
     approve_recommendation, get_alternatives, propose_plan_switch, reject_recommendation,
     rollback_last_change,
 )
+from app.modules.data_import.service import ImportRejected, import_plans, import_usage
 from app.modules.audit_logger.service import create_audit_log, get_user_audit_logs
 from app.orchestrator.pipeline import run_cycle as run_orchestrator_cycle
 
@@ -102,6 +105,14 @@ def _raise_validation(e: ValueError):
     raise HTTPException(
         status_code=422,
         detail={"status": "error", "message": str(e)},
+    )
+
+
+def _raise_import_rejected(e: ImportRejected):
+    """422 listing every problem found in the file."""
+    raise HTTPException(
+        status_code=422,
+        detail={"status": "error", "message": str(e), "errors": e.errors},
     )
 
 
@@ -349,6 +360,29 @@ def list_plans(
     return {"status": "success", "data": plans}
 
 
+@router.post(
+    "/plans/import",
+    response_model=SuccessResponse[dict],
+    tags=["Plan Catalog"],
+)
+def import_plans_csv(payload: PlanImportRequest, db: Session = Depends(get_db), current: User = _Auth):
+    """
+    Add or update catalog plans from CSV text (administrators only).
+
+    Columns: provider, plan_name, category, monthly_cost, then optionally
+    data_limit_gb, call_minutes_limit (blank = unlimited), features
+    (``5g;hotspot`` or a JSON object) and is_available.  Imported plans have
+    ``source="imported"``.  With ``retire_demo_plans`` the seeded demo plans
+    stop being recommended.  All-or-nothing, like the usage import.
+    """
+    require_admin(current)
+    try:
+        result = import_plans(db, current.id, payload.csv, payload.dry_run, payload.retire_demo_plans)
+    except ImportRejected as e:
+        _raise_import_rejected(e)
+    return {"status": "success", "data": result}
+
+
 # ═════════════════════════════════════════════════════════════
 #  SUBSCRIPTIONS
 # ═════════════════════════════════════════════════════════════
@@ -451,6 +485,31 @@ def record_usage(payload: UsageDataCreate, db: Session = Depends(get_db), curren
     except ValueError as e:
         _raise_validation(e)
     return {"status": "success", "data": record}
+
+
+@router.post(
+    "/usage/import",
+    response_model=SuccessResponse[dict],
+    tags=["Usage"],
+)
+def import_usage_csv(payload: UsageImportRequest, db: Session = Depends(get_db), current: User = _Auth):
+    """
+    Import usage records from CSV text for the authenticated user.
+
+    Columns: provider, period_start, period_end, then optionally data_used_gb,
+    call_minutes_used, billing_amount, subscription_id.  The whole file is
+    checked first; if any row is bad, nothing is imported and a 422 lists
+    every problem with its line number.  Importing the same file twice skips
+    records that already exist.  ``dry_run`` only reports.
+    """
+    _user_scope(current, payload.user_id, write=True)
+    try:
+        result = import_usage(db, payload.user_id, payload.csv, payload.dry_run)
+    except ImportRejected as e:
+        _raise_import_rejected(e)
+    except ValueError as e:
+        _raise_validation(e)
+    return {"status": "success", "data": result}
 
 
 @router.get(

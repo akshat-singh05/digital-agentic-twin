@@ -45,7 +45,9 @@ async function api(path, method = 'GET', body = null) {
   }
   if (!res.ok) {
     const msg = json?.message || json?.detail?.message || JSON.stringify(json?.detail) || 'Request failed';
-    throw new Error(msg);
+    const err = new Error(msg);
+    err.errors = json?.errors;                 // e.g. the problems found in an import file
+    throw err;
   }
   return json;
 }
@@ -749,6 +751,7 @@ async function renderUsage() {
             </form>
           </div>
         </div>
+        ${canAct() ? importCard('usage') : ''}
       </div>
     `;
   } catch (e) {
@@ -778,6 +781,108 @@ async function addUsage(e) {
     toast('error', 'Failed', err.message);
     btn.disabled = false;
     btn.innerHTML = '➕ Add Record';
+  }
+}
+
+// ═════════════════════════════════════════════════════════
+//  CSV IMPORT  (usage for yourself; plan catalog for admins)
+// ═════════════════════════════════════════════════════════
+const IMPORTS = {
+  usage: {
+    title: '📥 Import usage from CSV',
+    help: 'Columns: provider, period_start, period_end, then optionally data_used_gb, call_minutes_used, billing_amount. ' +
+          'Dates as YYYY-MM-DD. The file is checked first; one bad row rejects it. Re-importing a file skips records you already have.',
+    path: '/usage/import',
+    payload: (csv, dry) => ({ user_id: selectedUser, csv, dry_run: dry }),
+    after: () => renderUsage(),
+  },
+  plans: {
+    title: '📥 Import plan catalog from CSV (admin)',
+    help: 'Columns: provider, plan_name, category, monthly_cost, then optionally data_limit_gb, call_minutes_limit (blank = unlimited), ' +
+          'features (e.g. 5g;hotspot) and is_available. Existing plans are updated by provider + name.',
+    path: '/plans/import',
+    payload: (csv, dry) => ({ csv, dry_run: dry, retire_demo_plans: $('importRetire')?.checked || false }),
+    after: () => renderPlans(),
+  },
+};
+let pendingImport = null;   // { kind, csv } — a file that passed the dry run
+
+function importCard(kind) {
+  const spec = IMPORTS[kind];
+  return `
+    <div class="card" style="margin-top:20px">
+      <div class="card-header"><h3>${spec.title}</h3></div>
+      <p style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:12px">${spec.help}</p>
+      <div class="form-group">
+        <input type="file" id="importFile" accept=".csv,text/csv" onchange="checkImportFile('${kind}', this)" />
+      </div>
+      ${kind === 'plans' ? `<label style="display:flex;gap:8px;align-items:center;margin:8px 0;font-size:0.85rem">
+        <input type="checkbox" id="importRetire" onchange="document.getElementById('importFile').value='';pendingImport=null;document.getElementById('importBtn').hidden=true;document.getElementById('importResult').innerHTML=''" />
+        Also stop recommending the seeded demo plans</label>` : ''}
+      <div id="importResult" style="margin-top:12px"></div>
+      <div class="form-actions" style="margin-top:12px">
+        <button class="btn btn-primary" id="importBtn" hidden onclick="runImport()">Import</button>
+      </div>
+    </div>`;
+}
+
+function importProblems(errors) {
+  const lines = errors.slice(0, 10).map(e => `<li>Line ${e.line}${e.column && !e.message.startsWith(e.column) ? ' (' + esc(e.column) + ')' : ''}: ${esc(e.message)}</li>`);
+  const more = errors.length > 10 ? `<li>…and ${errors.length - 10} more</li>` : '';
+  return `<ul style="margin:6px 0 0 18px">${lines.join('')}${more}</ul>`;
+}
+
+function importSummary(kind, r) {
+  if (kind === 'usage') {
+    const parts = [`${r.imported} new record(s)`, `${r.skipped_existing} already present`];
+    let html = `<div>${parts.join(' · ')}</div>`;
+    if (r.unlinked_providers?.length) {
+      html += `<div style="margin-top:6px">⚠️ No subscription found for ${r.unlinked_providers.map(esc).join(', ')} —
+        add one on the Subscriptions page, or these records are not used in the analysis.</div>`;
+    }
+    return html;
+  }
+  return `<div>${r.created} new plan(s) · ${r.updated} updated${r.retired_demo_plans ? ` · ${r.retired_demo_plans} demo plan(s) hidden` : ''}</div>`;
+}
+
+async function checkImportFile(kind, input) {
+  const out = $('importResult'), btn = $('importBtn');
+  pendingImport = null;
+  btn.hidden = true;
+  const file = input.files[0];
+  if (!file) { out.innerHTML = ''; return; }
+  if (file.size > 1_000_000) {
+    out.innerHTML = '<div class="result-message"><span class="msg-icon">❌</span>That file is over 1 MB; split it.</div>';
+    return;
+  }
+  const csv = await file.text();
+  out.innerHTML = loading('Checking the file...');
+  try {
+    const r = (await apiPost(IMPORTS[kind].path, IMPORTS[kind].payload(csv, true))).data;
+    pendingImport = { kind, csv };
+    out.innerHTML = `<div class="result-message"><span class="msg-icon">✅</span><div>The file is valid. ${importSummary(kind, r)}</div></div>`;
+    btn.hidden = (kind === 'usage' ? r.imported : r.created + r.updated + r.retired_demo_plans) === 0;
+    btn.textContent = kind === 'usage' ? `Import ${r.imported} record(s)` : 'Import plans';
+  } catch (err) {
+    out.innerHTML = `<div class="result-message"><span class="msg-icon">❌</span><div>${esc(err.message)}${err.errors ? importProblems(err.errors) : ''}</div></div>`;
+  }
+}
+
+async function runImport() {
+  if (!pendingImport) return;
+  const { kind, csv } = pendingImport;
+  const btn = $('importBtn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> Importing...';
+  try {
+    const r = (await apiPost(IMPORTS[kind].path, IMPORTS[kind].payload(csv, false))).data;
+    pendingImport = null;
+    toast('success', 'Import complete', kind === 'usage' ? `${r.imported} record(s) added` : `${r.created} added, ${r.updated} updated`);
+    IMPORTS[kind].after();
+  } catch (err) {
+    toast('error', 'Import failed', err.message);
+    btn.disabled = false;
+    btn.textContent = 'Import';
   }
 }
 
@@ -1216,6 +1321,7 @@ async function renderPlans() {
     body.innerHTML = `
       <div class="page-section">
         ${readOnlyNote()}
+        ${isAdmin() ? importCard('plans') : ''}
         <p style="color:var(--text-secondary);font-size:0.88rem;margin-bottom:16px">
           Catalog plans are checked against your peak and projected usage (+10% headroom) and your
           preferences. Catalog prices are demo data, not live provider pricing.

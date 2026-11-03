@@ -1,0 +1,4 @@
+provider,plan_name,category,monthly_cost,data_limit_gb,call_minutes_limit,features,is_available
+Jio,Example 349,mobile,349,45,300,5g;hotspot,true
+Jio,Example 499,mobile,499,75,,5g;hotspot;wifi_calling,true
+Airtel,Example 399,mobile,399,50,400,5g,true

@@ -40,6 +40,13 @@ def test_every_nav_page_has_a_renderer_and_title():
     assert pages <= titles, pages - titles
 
 
+def test_import_cards_call_real_endpoints():
+    paths = re.findall(r"^\s+path:\s+'(/[^']+)',", _JS, re.M)
+    assert sorted(paths) == ["/plans/import", "/usage/import"]
+    routes = _api_routes()
+    assert all((_normalize(p), "POST") in routes for p in paths)
+
+
 def test_every_api_call_in_the_dashboard_exists():
     calls = re.findall(r"api(Get|Post|Put)\(\s*[`'\"]([^`'\"]+)[`'\"]", _JS)
     calls += [("Post" if m == "POST" else "Get", p)

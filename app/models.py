@@ -200,7 +200,7 @@ class AuditLog(Base):
     user_id     = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     run_id      = Column(Integer, ForeignKey("agent_runs.id", ondelete="SET NULL"), nullable=True, index=True)
 
-    action      = Column(String(60), nullable=False)         # analysis | negotiation | switching | consent | sign_in
+    action      = Column(String(60), nullable=False)         # analysis | negotiation | switching | consent | sign_in | import
     module      = Column(String(60), nullable=False)         # originating module name
     description = Column(Text, nullable=False)               # plain-English explanation
     details     = Column(Text, nullable=True)                # JSON-encoded payload

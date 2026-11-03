@@ -109,9 +109,12 @@ async def http_error_handler(request: Request, exc: StarletteHTTPException):
     """Unwrap HTTPException details (routes pass the envelope as detail)."""
     detail = exc.detail
     message = detail.get("message", str(detail)) if isinstance(detail, dict) else str(detail)
+    content = {"status": "error", "message": message}
+    if isinstance(detail, dict) and "errors" in detail:
+        content["errors"] = detail["errors"]        # e.g. the problems found in an import file
     return JSONResponse(
         status_code=exc.status_code,
-        content={"status": "error", "message": message},
+        content=content,
         headers=getattr(exc, "headers", None),
     )
 

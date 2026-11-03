@@ -29,6 +29,7 @@ _MODULE_MAP = {
     "consent": "privacy_mediator",
     "access_denied": "privacy_mediator",
     "sign_in": "authentication",
+    "import": "data_import",
     "recommendation": "plan_switching",
     "rollback": "plan_switching",
 }

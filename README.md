@@ -198,7 +198,8 @@ sequenceDiagram
 | Usage analysis | **Real, rule-based** | Computed from stored usage records. No machine learning. |
 | Consent gate, audit trail, approvals, rollback | **Real** | Enforced in the service layer; every agent passes the gate. |
 | Differential privacy | **Real, basic** | Laplace noise per call. There is no privacy-budget accounting. |
-| Plan catalog | **Demo data** | Seeded, `source: "demo_seed"`; not live provider pricing. |
+| Plan catalog | **Demo data, replaceable** | Seeded as `source: "demo_seed"`, not live pricing. An admin can import real plans from CSV (`source: "imported"`) — but the prices are whatever you type in; nothing is fetched from providers. |
+| Your usage data | **Real, entered by you** | Added by hand or imported from CSV; there is no bill or provider connection. |
 | Provider negotiation | **Simulated** | A seeded simulator, labelled `simulated: true`. No provider is contacted. |
 | Applying a plan change | **Updates the twin's own records only** | Approval changes the subscription row in this database; nothing is sent to a provider. |
 | Real provider APIs, ML analysis, RL negotiation | **Planned** | See *Future Enhancements*. |
@@ -340,6 +341,8 @@ underutilized they are skipped (`"skipped"` in the response). A switch is only e
 | `GET` | `/api/subscriptions/{sub_id}` | Get a subscription by ID |
 | `POST` | `/api/usage` | Ingest a usage record (linked to the user's subscription with that provider, or an explicit `subscription_id`) |
 | `GET` | `/api/usage/user/{user_id}` | List user's usage records |
+| `POST` | `/api/usage/import` | Import your usage records from CSV text (all-or-nothing, `dry_run` to check; see *Using your own data*) |
+| `POST` | `/api/plans/import` | Add or update catalog plans from CSV text (**admin only**; `retire_demo_plans` hides the demo plans) |
 | `GET` | `/api/subscriptions/{sub_id}/history` | Every applied change to a subscription |
 | `GET` | `/api/subscriptions/{sub_id}/alternatives` | Catalog plans that fit, best saving first, and why the rest don't (consent: `usage_analysis`) |
 | `GET` / `PUT` | `/api/users/{user_id}/preferences` | Budget, minimum data/minutes, required features, provider rules |
@@ -459,7 +462,31 @@ The suite uses a throwaway SQLite database and needs no running server.
 `test_integration.py` is an older smoke script that runs against a live server
 (`python test_integration.py` with uvicorn running).
 
-### 8. Run with Docker
+### 8. Using your own data
+
+The demo accounts are fake. To use the twin for yourself, register an account, add your
+real subscriptions, then bring in your usage and real plan prices:
+
+1. **Usage** — on the *Usage Data* page choose a CSV (or `POST /api/usage/import`). Columns:
+   `provider, period_start, period_end` and optionally `data_used_gb, call_minutes_used, billing_amount`.
+   The file is checked first and one bad row rejects all of it with line numbers; importing the same
+   file again skips records you already have. See [docs/samples/usage.csv](docs/samples/usage.csv).
+2. **Plan catalog** — the alternatives it recommends come from the catalog, which starts as demo data.
+   Make your account an administrator once (there is deliberately no API for this):
+
+   ```bash
+   python -m app.utils.promote_admin you@example.com
+   ```
+
+   then, on the *Plans & Alternatives* page, import a CSV of real plans with *Also stop recommending the
+   seeded demo plans* ticked. Columns: `provider, plan_name, category, monthly_cost` and optionally
+   `data_limit_gb, call_minutes_limit` (blank = unlimited), `features` (`5g;hotspot`), `is_available`.
+   See [docs/samples/plans.csv](docs/samples/plans.csv). **You** type in the prices, so keep them current.
+3. Run a decision cycle. The analysis and alternatives now use your numbers. Negotiation is still a
+   simulation (see the *Known limitations*), and approving a change only updates this app — you still
+   switch the plan with the provider yourself.
+
+### 9. Run with Docker
 
 The image runs as an unprivileged user with one Uvicorn worker, and keeps the
 SQLite database on a volume at `/data`. `SECRET_KEY` has no default: the container
@@ -649,6 +676,7 @@ alembic revision --autogenerate -m "describe change"   # after editing app/model
 These are properties of the code as it stands, not planned behaviour.
 
 **Scope**
+- Everything you enter (usage, plan prices) comes from you, as a form or CSV. Nothing is pulled from a bill, a provider or an app, so the analysis is only as current as your last import.
 - Negotiation is simulated and the catalog is demo data (see the table above). Approving a change does not change anything at a real provider.
 - The analyzer is rule-based. Its "savings" are computed from the stored records and the catalog; they are not forecasts of real bills.
 

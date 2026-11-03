@@ -186,6 +186,18 @@ def _format_sign_in(payload: Dict[str, Any]) -> str:
     return f"Account event: {outcome}."
 
 
+def _format_import(payload: Dict[str, Any]) -> str:
+    """Explanation for a CSV import."""
+    kind = _safe_get(payload, "kind", "data")
+    if kind == "plans":
+        text = (f"Plan catalog import: {_safe_get(payload, 'created')} added, "
+                f"{_safe_get(payload, 'updated')} updated")
+        retired = _safe_get(payload, "retired")
+        return text + (f", {retired} demo plan(s) retired." if retired else ".")
+    return (f"Usage import: {_safe_get(payload, 'created')} record(s) added, "
+            f"{_safe_get(payload, 'skipped')} already present.")
+
+
 def _format_recommendation(payload: Dict[str, Any]) -> str:
     """Explanation for a user decision on, or expiry of, a recommendation."""
     rec_id = _safe_get(payload, "recommendation_id", "?")
@@ -220,6 +232,7 @@ _FORMATTERS = {
     "consent": _format_consent,
     "access_denied": _format_access_denied,
     "sign_in": _format_sign_in,
+    "import": _format_import,
     "recommendation": _format_recommendation,
     "rollback": _format_rollback,
 }

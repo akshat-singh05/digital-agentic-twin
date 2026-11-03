@@ -209,6 +209,22 @@ class UsageDataCreate(BaseModel):
         return v
 
 
+class UsageImportRequest(BaseModel):
+    """A usage CSV (see docs/samples) to import for one user."""
+    user_id: int = Field(..., gt=0, description="ID of the user the records belong to")
+    csv: str = Field(..., min_length=1, max_length=1_000_000, description="The CSV file's text")
+    dry_run: bool = Field(False, description="Check the file and report, without importing")
+
+
+class PlanImportRequest(BaseModel):
+    """A plan-catalog CSV (see docs/samples) to import (admin only)."""
+    csv: str = Field(..., min_length=1, max_length=1_000_000, description="The CSV file's text")
+    dry_run: bool = Field(False, description="Check the file and report, without importing")
+    retire_demo_plans: bool = Field(
+        False, description="Also make the remaining demo_seed plans unavailable",
+    )
+
+
 class UsageDataOut(BaseModel):
     """Public representation of a usage record."""
     id: int

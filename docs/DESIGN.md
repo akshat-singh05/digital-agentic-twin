@@ -98,7 +98,16 @@ be probed. Admins can read but never act for a user: consents, preferences, usag
 approvals are the owner's alone.
 *See `app/core/security.py`.*
 
-## 9. Say what is real
+## 9. Your data in, all-or-nothing
+
+Real data enters as CSV (usage for yourself, plan prices for an administrator). A file is
+validated as a whole and **one bad row rejects all of it**, with the line and column of every
+problem, so a file is never half-imported. A dry run reports what would happen first, and
+importing the same file twice adds nothing. Making someone an administrator is a
+command-line step with no API, so nobody can promote themselves.
+*See `app/modules/data_import/`.*
+
+## 10. Say what is real
 
 The README separates what is real (analysis, consent, audit, approvals, rollback), what is
 basic (differential privacy), what is demo data (the plan catalog) and what is simulated
