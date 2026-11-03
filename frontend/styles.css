@@ -1234,6 +1234,8 @@ tr:hover td {
 .login-switch { margin-top: 12px; text-align: center; font-size: 0.82rem; color: var(--text-secondary); }
 .login-switch a { color: var(--accent-secondary); cursor: pointer; }
 .login-error { margin-top: 12px; color: var(--danger); font-size: 0.82rem; min-height: 1em; }
+.login-notice { margin-top: 12px; color: var(--success); font-size: 0.82rem; }
+.login-notice:empty { display: none; }
 .session-user { color: var(--text-secondary); font-size: 0.82rem; margin-right: 8px; }
 
 /* The hidden attribute must win over component display rules (e.g. .btn). */

@@ -39,9 +39,28 @@ CORS_ORIGINS = [
     ).split(",") if o.strip()
 ]
 
-# Requests per client IP per minute (0 disables).  In-memory, per process.
+# ── Accounts: email, verification, password reset ────────────
+# Where emails are sent.  console: written to the log (development only);
+# smtp: sent through SMTP_*; memory: kept in a list (tests).
+MAIL_MODE = os.getenv("MAIL_MODE", "console").lower()
+MAIL_FROM = os.getenv("MAIL_FROM", "Digital Twin <no-reply@localhost>")
+SMTP_HOST = os.getenv("SMTP_HOST", "")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER = os.getenv("SMTP_USER", "")
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
+SMTP_STARTTLS = os.getenv("SMTP_STARTTLS", "true").lower() in ("1", "true", "yes")
+# Public address of the app, used in the links inside emails.
+APP_BASE_URL = os.getenv("APP_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
+RESET_TOKEN_MINUTES = int(os.getenv("RESET_TOKEN_MINUTES", "30"))
+VERIFY_TOKEN_HOURS = int(os.getenv("VERIFY_TOKEN_HOURS", "24"))
+# When true, an account must verify its email address before it can sign in.
+REQUIRE_EMAIL_VERIFICATION = os.getenv("REQUIRE_EMAIL_VERIFICATION", "false").lower() in ("1", "true", "yes")
+
+# Requests per client IP per minute (0 disables).  In memory and per process
+# unless REDIS_URL is set, which shares the counters between processes.
 RATE_LIMIT_PER_MINUTE = int(os.getenv("RATE_LIMIT_PER_MINUTE", "120"))
 LOGIN_RATE_LIMIT_PER_MINUTE = int(os.getenv("LOGIN_RATE_LIMIT_PER_MINUTE", "10"))
+REDIS_URL = os.getenv("REDIS_URL", "")
 
 # Days a rejected proposal is not offered again unchanged (0 disables).
 REJECTION_COOLDOWN_DAYS = int(os.getenv("REJECTION_COOLDOWN_DAYS", "30"))

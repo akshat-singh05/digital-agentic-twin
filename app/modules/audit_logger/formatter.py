@@ -189,6 +189,14 @@ def _format_sign_in(payload: Dict[str, Any]) -> str:
         return "Signed in."
     if outcome == "failed":
         return "Failed sign-in attempt: wrong password."
+    wording = {
+        "password_reset": "Password reset with an emailed link; all sessions signed out.",
+        "password_changed": "Password changed; other sessions signed out.",
+        "email_verified": "Email address confirmed.",
+        "signed_out_everywhere": "Signed out everywhere.",
+    }
+    if outcome in wording:
+        return wording[outcome]
     return f"Account event: {outcome}."
 
 

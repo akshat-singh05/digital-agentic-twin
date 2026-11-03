@@ -1482,6 +1482,62 @@ function privacyEventLabel(l) {
   return '🔑 consent';
 }
 
+function accountSecurityCard() {
+  const verified = currentUser.email_verified;
+  return `
+        <div class="card" style="margin-top:20px">
+          <div class="card-header"><h3>🔐 Account security</h3>
+            ${verified ? badge('email confirmed', 'success') : badge('email not confirmed', 'warning')}</div>
+          ${verified ? '' : `<p style="color:var(--text-secondary);font-size:0.88rem;margin-bottom:12px">
+            Confirm ${esc(currentUser.email)} with the link we emailed you.
+            <button class="btn btn-secondary btn-sm" onclick="resendVerification()">Send it again</button></p>`}
+          <form onsubmit="changePassword(event)">
+            <div class="form-grid">
+              <div class="form-group"><label>Current password</label>
+                <input type="password" id="pwCurrent" autocomplete="current-password" required /></div>
+              <div class="form-group"><label>New password (8+ characters)</label>
+                <input type="password" id="pwNew" autocomplete="new-password" minlength="8" required /></div>
+            </div>
+            <div class="form-actions" style="margin-top:12px">
+              <button class="btn btn-primary" type="submit" id="btnPassword">Change password</button>
+              <button class="btn btn-secondary" type="button" onclick="signOutEverywhere()">Sign out everywhere</button>
+            </div>
+          </form>
+          <p style="color:var(--text-muted);font-size:0.8rem;margin-top:10px">
+            Changing your password signs out every other device. “Sign out everywhere” ends this session too.</p>
+        </div>`;
+}
+
+async function resendVerification() {
+  try {
+    toast('success', 'Done', (await apiPost('/auth/resend-verification')).data.message);
+  } catch (e) { toast('error', 'Could not send', e.message); }
+}
+
+async function changePassword(e) {
+  e.preventDefault();
+  const btn = $('btnPassword');
+  btn.disabled = true;
+  try {
+    const res = await apiPost('/auth/change-password',
+      { current_password: $('pwCurrent').value, new_password: $('pwNew').value });
+    setToken(res.data.access_token);              // this session continues; the others end
+    toast('success', 'Password changed', 'Other devices were signed out.');
+    renderPrivacy();
+  } catch (err) {
+    toast('error', 'Could not change password', err.message);
+    btn.disabled = false;
+  }
+}
+
+async function signOutEverywhere() {
+  try {
+    await apiPost('/auth/logout-all');
+    toast('success', 'Signed out everywhere');
+  } catch (e) { toast('error', 'Failed', e.message); return; }
+  logout();
+}
+
 async function renderPrivacy() {
   const body = $('contentBody');
   if (!selectedUser) { body.innerHTML = emptyState('🔒', 'Select a User', 'Choose a user to manage privacy.'); return; }
@@ -1539,6 +1595,7 @@ async function renderPrivacy() {
             </form>
           </div>
         </div>
+        ${canAct() ? accountSecurityCard() : ''}
         <div class="card" style="margin-top:20px">
           <div class="card-header"><h3>🕑 Privacy Activity</h3>${badge(events.length + ' recent', 'info')}</div>
           ${events.length === 0 ? emptyState('🔒', 'No privacy events yet', 'Permission changes, blocked agent access and sign-ins appear here.') :
@@ -1669,7 +1726,8 @@ async function renderActivity() {
   }
 }
 
-let registering = false;
+let loginMode = 'login';      // login | register | forgot | reset
+let resetToken = null;        // from the link in the password-reset email
 
 function showLogin(message = '') {
   $('loginOverlay').hidden = false;
@@ -1678,30 +1736,61 @@ function showLogin(message = '') {
   $('sessionUser').textContent = '';
 }
 
-function toggleRegister() {
-  registering = !registering;
-  $('loginNameGroup').hidden = !registering;
-  $('loginName').required = registering;
-  $('loginTitle').textContent = registering ? 'Create your account' : 'Sign in to your digital twin';
-  $('btnLogin').textContent = registering ? 'Create account' : 'Sign in';
-  $('loginPassword').autocomplete = registering ? 'new-password' : 'current-password';
-  $('loginSwitch').innerHTML = registering
-    ? 'Have an account? <a onclick="toggleRegister()">Sign in</a>'
-    : 'No account? <a onclick="toggleRegister()">Create one</a>';
+const LOGIN_MODES = {
+  login:    { title: 'Sign in to your digital twin', button: 'Sign in', name: false, email: true,  password: true,  passwordLabel: 'Password' },
+  register: { title: 'Create your account',          button: 'Create account', name: true, email: true, password: true, passwordLabel: 'Password' },
+  forgot:   { title: 'Reset your password',          button: 'Email me a reset link', name: false, email: true, password: false, passwordLabel: 'Password' },
+  reset:    { title: 'Choose a new password',        button: 'Save new password', name: false, email: false, password: true, passwordLabel: 'New password (8+ characters)' },
+};
+
+function setLoginMode(mode, notice = '') {
+  loginMode = mode;
+  const m = LOGIN_MODES[mode];
+  $('loginNameGroup').hidden = !m.name;
+  $('loginName').required = m.name;
+  $('loginEmailGroup').hidden = !m.email;
+  $('loginEmail').required = m.email;
+  $('loginPasswordGroup').hidden = !m.password;
+  $('loginPassword').required = m.password;
+  $('loginPasswordLabel').textContent = m.passwordLabel;
+  $('loginPassword').autocomplete = mode === 'login' ? 'current-password' : 'new-password';
+  $('loginTitle').textContent = m.title;
+  $('btnLogin').textContent = m.button;
+  $('loginForgot').hidden = mode !== 'login';
+  $('loginSwitch').innerHTML = mode === 'register' || mode === 'forgot' || mode === 'reset'
+    ? 'Back to <a onclick="setLoginMode(\'login\')">sign in</a>'
+    : 'No account? <a onclick="setLoginMode(\'register\')">Create one</a>';
   $('loginError').textContent = '';
+  $('loginNotice').textContent = notice;
 }
+
+function toggleRegister() { setLoginMode(loginMode === 'register' ? 'login' : 'register'); }
 
 async function submitLogin(e) {
   e.preventDefault();
   const btn = $('btnLogin');
   btn.disabled = true;
+  $('loginError').textContent = '';
   try {
+    if (loginMode === 'forgot') {
+      const res = await apiPost('/auth/forgot-password', { email: $('loginEmail').value.trim() });
+      $('loginNotice').textContent = res.data.message;
+      return;
+    }
+    if (loginMode === 'reset') {
+      await apiPost('/auth/reset-password', { token: resetToken, new_password: $('loginPassword').value });
+      resetToken = null;
+      $('loginPassword').value = '';
+      setLoginMode('login', 'Password updated. Sign in with the new one.');
+      return;
+    }
     const body = { email: $('loginEmail').value.trim(), password: $('loginPassword').value };
-    if (registering) body.name = $('loginName').value.trim();
-    const res = await apiPost(registering ? '/auth/register' : '/auth/login', body);
+    if (loginMode === 'register') body.name = $('loginName').value.trim();
+    const res = await apiPost(loginMode === 'register' ? '/auth/register' : '/auth/login', body);
     setToken(res.data.access_token);
     $('loginPassword').value = '';
     await startSession();
+    if (loginMode === 'register') toast('info', 'Check your email', 'We sent a link to confirm your address.');
   } catch (err) {
     $('loginError').textContent = err.message;
   } finally {
@@ -1729,10 +1818,24 @@ function logout() {
 
 (async function init() {
   await checkServer();
-  if (getToken()) {
-    try { await startSession(); } catch { showLogin(); }
+  // Links from emails: take the token out of the address bar at once (history, referrers).
+  const params = new URLSearchParams(location.search);
+  const resetParam = params.get('reset'), verifyParam = params.get('verify');
+  if (resetParam || verifyParam) history.replaceState(null, '', location.pathname);
+  let notice = '';
+  if (verifyParam) {
+    try { notice = (await apiPost('/auth/verify-email', { token: verifyParam })).data.message; }
+    catch (err) { notice = err.message; }
+  }
+  if (resetParam) {
+    resetToken = resetParam;
+    showLogin();
+    setLoginMode('reset');
+  } else if (getToken()) {
+    try { await startSession(); if (notice) toast('info', 'Email', notice); } catch { showLogin(); setLoginMode('login', notice); }
   } else {
     showLogin();
+    setLoginMode('login', notice);
   }
   // Recheck server every 30s
   setInterval(checkServer, 30000);

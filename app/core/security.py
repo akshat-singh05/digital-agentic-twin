@@ -4,9 +4,11 @@ dependency used by every protected route.
 
 Passwords are hashed in app/core/passwords.py (scrypt).
 
-Tokens: signed JWT (HS256, PyJWT) carrying the user id; the user and role
-are re-read from the database on every request, so a deleted user or a
-changed role takes effect immediately.
+Tokens: signed JWT (HS256, PyJWT) carrying the user id and the user's
+``token_version``; the user and role are re-read from the database on every
+request, so a deleted user or a changed role takes effect immediately, and
+raising ``token_version`` (password change or reset, "sign out everywhere")
+revokes every token issued before.
 
 Authorization rule (``authorize``):
   - a user may read and act on their own data;
@@ -34,9 +36,9 @@ _bearer = HTTPBearer(auto_error=False, description="Access token from POST /api/
 # ─────────────────────────────────────────────────────────────
 # Tokens
 # ─────────────────────────────────────────────────────────────
-def create_access_token(user_id: int, minutes: int = ACCESS_TOKEN_MINUTES) -> str:
+def create_access_token(user_id: int, minutes: int = ACCESS_TOKEN_MINUTES, token_version: int = 0) -> str:
     now = datetime.now(timezone.utc)
-    payload = {"sub": str(user_id), "iat": now, "exp": now + timedelta(minutes=minutes)}
+    payload = {"sub": str(user_id), "tv": token_version, "iat": now, "exp": now + timedelta(minutes=minutes)}
     return jwt.encode(payload, SECRET_KEY, algorithm=_ALGORITHM)
 
 
@@ -58,6 +60,7 @@ def get_current_user(
     try:
         payload = jwt.decode(credentials.credentials, SECRET_KEY, algorithms=[_ALGORITHM])
         user_id = int(payload["sub"])
+        version = int(payload.get("tv", 0))
     except jwt.ExpiredSignatureError:
         raise _unauthorized("Token has expired; log in again")
     except (jwt.InvalidTokenError, KeyError, ValueError):
@@ -66,6 +69,8 @@ def get_current_user(
     user = db.get(User, user_id)
     if user is None:
         raise _unauthorized("Invalid token")
+    if version != user.token_version:
+        raise _unauthorized("This session was signed out; log in again")
     return user
 
 

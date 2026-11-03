@@ -81,6 +81,7 @@ class UserOut(BaseModel):
     email: str
     phone: Optional[str] = None
     role: str = "user"
+    email_verified: bool = False
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -108,6 +109,33 @@ class LoginRequest(BaseModel):
     @classmethod
     def normalize_email(cls, v: str) -> str:
         return v.strip().lower()
+
+
+class ForgotPasswordRequest(BaseModel):
+    """Ask for a password-reset email."""
+    email: str = Field(..., min_length=3, max_length=255)
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, v: str) -> str:
+        return v.strip().lower()
+
+
+class ResetPasswordRequest(BaseModel):
+    """Set a new password using the token from the email link."""
+    token: str = Field(..., min_length=10, max_length=200)
+    new_password: str = Field(..., min_length=8, max_length=128, description="At least 8 characters")
+
+
+class VerifyEmailRequest(BaseModel):
+    """Confirm an email address using the token from the email link."""
+    token: str = Field(..., min_length=10, max_length=200)
+
+
+class ChangePasswordRequest(BaseModel):
+    """Change the password of the signed-in account."""
+    current_password: str = Field(..., min_length=1, max_length=128)
+    new_password: str = Field(..., min_length=8, max_length=128, description="At least 8 characters")
 
 
 class TokenOut(BaseModel):

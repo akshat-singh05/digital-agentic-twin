@@ -323,12 +323,20 @@ underutilized they are skipped (`"skipped"` in the response). A negotiated price
 | `POST` | `/api/auth/register` | Create an account (role `user`) and get a token |
 | `POST` | `/api/auth/login` | Email + password → token (rate limited) |
 | `GET` | `/api/auth/me` | The signed-in user |
+| `POST` | `/api/auth/forgot-password` | Email a single-use reset link (same answer whether or not the address exists; rate limited) |
+| `POST` | `/api/auth/reset-password` | Set a new password with the emailed token; signs out every session |
+| `POST` | `/api/auth/verify-email` | Confirm an address with the emailed token |
+| `POST` | `/api/auth/resend-verification` | Send the signed-in user a fresh confirmation email |
+| `POST` | `/api/auth/change-password` | Change the password (needs the current one); other sessions end, this one continues |
+| `POST` | `/api/auth/logout-all` | Sign out everywhere: every token issued so far stops working |
 
 - **Users reach only their own data.** Another user's records answer 404, so they can't be probed.
 - **Admins can read** any user's data but **cannot act for them** — consents, preferences, usage,
   agent runs and approvals are the owner's alone (403).
-- Passwords are stored as salted scrypt hashes; tokens expire after `ACCESS_TOKEN_MINUTES` (60).
-- Account creation, sign-ins, and failed sign-ins against a real account are written to that user's audit log (action `sign_in`); failures for unknown emails are not recorded.
+- Passwords are stored as salted scrypt hashes; tokens expire after `ACCESS_TOKEN_MINUTES` (60) and can be revoked (password change or reset, *sign out everywhere*).
+- Reset and confirmation links are random, single-use and expire; only their hash is stored.
+- Account creation, sign-ins, failed sign-ins against a real account, password changes and resets are written to that user's audit log (action `sign_in`); failures for unknown emails are not recorded.
+- See [docs/SECURITY.md](docs/SECURITY.md) for what is and is not protected.
 
 ### Core Data
 
@@ -442,10 +450,15 @@ The dashboard and API are now live at **http://127.0.0.1:8000** — sign in with
 | `ACCESS_TOKEN_MINUTES` | `60` | Token lifetime |
 | `CORS_ORIGINS` | `http://127.0.0.1:8000,http://localhost:8000` | Other browser origins allowed to call the API |
 | `RATE_LIMIT_PER_MINUTE` | `120` | Per client IP; `0` disables |
-| `LOGIN_RATE_LIMIT_PER_MINUTE` | `10` | Login/register, per client IP |
+| `LOGIN_RATE_LIMIT_PER_MINUTE` | `10` | Login, register and password-reset requests, per client IP |
+| `REDIS_URL` | *(empty)* | Share rate-limit counters between processes, e.g. `redis://host:6379/0`; empty = in-memory |
+| `MAIL_MODE` | `console` | `smtp` to send real email (needs `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `MAIL_FROM`); `console` only logs the message — development only, the log then holds working reset links |
+| `APP_BASE_URL` | `http://127.0.0.1:8000` | Public address used in the links inside emails |
+| `REQUIRE_EMAIL_VERIFICATION` | `false` | `true` blocks sign-in until the address is confirmed |
+| `RESET_TOKEN_MINUTES` / `VERIFY_TOKEN_HOURS` | `30` / `24` | How long emailed links work |
 | `REJECTION_COOLDOWN_DAYS` | `30` | A rejected proposal is not offered again with identical terms for this long (`0` disables) |
 
-The rate limiter is in memory (per process); a multi-process deployment needs a shared store.
+Without `REDIS_URL` the rate limiter is in memory and per process. With it, counters are shared by every process (one counter per client, bucket and clock minute); if Redis is unreachable the limiter falls back to the in-memory one and logs the problem. When running several workers, apply migrations once first (`alembic upgrade head`) instead of letting every worker migrate at startup.
 
 ### 6. Explore the interactive docs
 
@@ -671,11 +684,14 @@ alembic revision --autogenerate -m "describe change"   # after editing app/model
 ### Before exposing this to real users
 
 - [ ] Set a strong `SECRET_KEY` and `DEBUG=false` (the app will not start otherwise).
-- [ ] Put it behind a TLS-terminating proxy; the app sets no HSTS/CSP headers itself.
+- [ ] Put it behind a TLS-terminating proxy. The app sends HSTS when a request arrives as HTTPS (or `X-Forwarded-Proto: https`), a CSP on the dashboard, `nosniff`, no-framing and no-referrer headers.
+- [ ] Set `MAIL_MODE=smtp` with working SMTP settings and `APP_BASE_URL`, and consider `REQUIRE_EMAIL_VERIFICATION=true`. In `console` mode reset links are written to the log.
+- [ ] Set `REDIS_URL` if you run more than one process or instance.
+- [ ] Put the database on an encrypted volume. The app does not encrypt the database itself (see docs/SECURITY.md).
 - [ ] Set `CORS_ORIGINS` to the origins that really need it.
 - [ ] Do not seed demo data (it has a published password).
 - [ ] Back up the SQLite file (or move to a server database — see below) before upgrades; migrations run automatically at startup.
-- [ ] Decide whether open self-registration (`POST /api/auth/register`) is acceptable; it has no email verification.
+- [ ] Decide whether open self-registration (`POST /api/auth/register`) is acceptable; addresses are only confirmed if you set `REQUIRE_EMAIL_VERIFICATION`.
 - [ ] Check the `LICENSE` copyright line (it names the repository owner) before publishing.
 
 ### Known limitations
@@ -688,9 +704,10 @@ These are properties of the code as it stands, not planned behaviour.
 - The analyzer is rule-based. Its "savings" are computed from the stored records and the catalog; they are not forecasts of real bills.
 
 **Security and accounts**
-- No password reset and no token refresh or revocation (a token is valid until it expires). Failed sign-ins for emails that have no account are logged by the server but not audited per user.
-- The dashboard keeps the token in `sessionStorage`, so it is exposed to any script running on the page.
-- Rate limiting is in memory and per process: it resets on restart and does not span several workers or instances. Behind a proxy it keys on the address Uvicorn reports, so configure forwarded headers correctly.
+- No token refresh (a token lasts until it expires or is revoked), no two-factor sign-in, and no per-account lockout (limits are per client address). Failed sign-ins for emails that have no account are logged by the server but not audited per user.
+- The dashboard keeps the token in `sessionStorage`, so it is exposed to any script running on the page, and its CSP must allow inline scripts because the pages use inline event handlers.
+- The database is **not encrypted by the app**: names, emails, usage and notes are stored in clear. Use an encrypted volume or a managed encrypted database.
+- Rate limiting is in memory and per process unless `REDIS_URL` is set (then it is shared, using a fixed one-minute window). Behind a proxy it keys on the address Uvicorn reports, so configure forwarded headers correctly.
 
 **Data**
 - Money is stored as floating point (`Float`), not decimals.
@@ -718,10 +735,9 @@ These are properties of the code as it stands, not planned behaviour.
 | **Stronger Privacy** | Implement ε-differential privacy with formal privacy budgets |
 | **Multi-User Scheduling** | Cron-based batch processing to run pipelines for all users periodically |
 | **PostgreSQL** | Verify migrations and tests on PostgreSQL for multi-user deployments |
-| **Accounts** | Password reset and token refresh/revocation |
+| **Accounts** | Token refresh, two-factor sign-in, per-account lockout |
 | **WebSocket Notifications** | Real-time pipeline progress updates via WebSocket |
 | **Usage Charts** | Trend charts on the dashboard (data is already served by the API) |
-| **Shared rate limiting** | Redis-backed counters so limits hold across workers |
 
 ---
 

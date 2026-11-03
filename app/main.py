@@ -12,6 +12,7 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
+from starlette.concurrency import run_in_threadpool
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -72,7 +73,10 @@ app = FastAPI(
 @app.middleware("http")
 async def rate_limit_middleware(request: Request, call_next):
     client_ip = request.client.host if request.client else "unknown"
-    retry_after = rate_limit.check(client_ip, request.url.path)
+    if rate_limit.uses_redis():          # a network call: keep it off the event loop
+        retry_after = await run_in_threadpool(rate_limit.check, client_ip, request.url.path)
+    else:
+        retry_after = rate_limit.check(client_ip, request.url.path)
     if retry_after:
         return JSONResponse(
             status_code=429,
@@ -89,6 +93,37 @@ async def no_stale_dashboard(request: Request, call_next):
     path = request.url.path
     if path == "/" or path.startswith("/static/"):
         response.headers["Cache-Control"] = "no-cache"
+    return response
+
+
+# ── Security headers ─────────────────────────────────────────
+# The dashboard still uses inline event handlers, so its script-src has to allow
+# 'unsafe-inline'; the rest of the policy (no framing, no plugins, no foreign
+# connections, fixed base URI and form targets) still applies.  /docs loads its
+# assets from a CDN, so the policy is sent only with the dashboard itself.
+_DASHBOARD_CSP = (
+    "default-src 'self'; script-src 'self' 'unsafe-inline'; "
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+    "font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; "
+    "object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
+)
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    path = request.url.path
+    headers = response.headers
+    headers["X-Content-Type-Options"] = "nosniff"
+    headers["X-Frame-Options"] = "DENY"
+    headers["Referrer-Policy"] = "no-referrer"
+    headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    if path == "/" or path.startswith("/static/"):
+        headers["Content-Security-Policy"] = _DASHBOARD_CSP
+    if path.startswith("/api/"):
+        headers["Cache-Control"] = "no-store"          # tokens and personal data are never cached
+    if request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https":
+        headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     return response
 
 

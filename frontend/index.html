@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="description" content="Agentic Digital Twin — Intelligent subscription management dashboard" />
   <title>Agentic Digital Twin — Dashboard</title>
-  <link rel="stylesheet" href="/static/styles.css?v=5" />
+  <link rel="stylesheet" href="/static/styles.css?v=6" />
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🤖</text></svg>" />
 </head>
 <body>
@@ -108,19 +108,21 @@
           <label for="loginName">Full name</label>
           <input type="text" id="loginName" autocomplete="name" />
         </div>
-        <div class="form-group">
+        <div class="form-group" id="loginEmailGroup">
           <label for="loginEmail">Email</label>
           <input type="email" id="loginEmail" autocomplete="username" required />
         </div>
-        <div class="form-group">
-          <label for="loginPassword">Password</label>
+        <div class="form-group" id="loginPasswordGroup">
+          <label for="loginPassword" id="loginPasswordLabel">Password</label>
           <input type="password" id="loginPassword" autocomplete="current-password" required />
         </div>
         <button class="btn btn-primary" type="submit" id="btnLogin">Sign in</button>
       </form>
+      <div class="login-switch" id="loginForgot"><a onclick="setLoginMode('forgot')">Forgot your password?</a></div>
       <div class="login-switch" id="loginSwitch">
         No account? <a onclick="toggleRegister()">Create one</a>
       </div>
+      <div class="login-notice" id="loginNotice" role="status"></div>
       <div class="login-error" id="loginError"></div>
     </div>
   </div>
@@ -128,6 +130,6 @@
   <!-- ═══ TOAST CONTAINER ═══ -->
   <div class="toast-container" id="toastContainer"></div>
 
-  <script src="/static/script.js?v=8"></script>
+  <script src="/static/script.js?v=9"></script>
 </body>
 </html>

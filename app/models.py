@@ -60,7 +60,15 @@ class User(Base):
     # log in until a password is set.
     password_hash = Column(String(255), nullable=True)
     role       = Column(String(20), nullable=False, default="user", server_default="user")  # user | admin
+    # Set when the user proves they control the address (email link or password reset).
+    email_verified_at = Column(DateTime, nullable=True)
+    # Raised to sign a user out everywhere: access tokens carry the version they were issued with.
+    token_version = Column(Integer, nullable=False, default=0, server_default="0")
     created_at = Column(DateTime, default=_utcnow, nullable=False)
+
+    @property
+    def email_verified(self) -> bool:
+        return self.email_verified_at is not None
 
     # ── Relationships ────────────────────────────────────────
     subscriptions = relationship(
@@ -206,6 +214,32 @@ class NegotiationBrief(Base):
 
     def __repr__(self):
         return f"<NegotiationBrief id={self.id} sub={self.subscription_id} status={self.status!r}>"
+
+
+ACCOUNT_TOKEN_PURPOSES = ("reset", "verify")
+
+
+class AccountToken(Base):
+    """
+    A single-use link token (password reset, email verification).
+
+    Only the SHA-256 of the token is stored, so a copy of the database
+    cannot be used to reset anyone's password.
+    """
+
+    __tablename__ = "account_tokens"
+
+    id         = Column(Integer, primary_key=True)
+    user_id    = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    purpose    = Column(String(10), nullable=False)
+    token_hash = Column(String(64), nullable=False, unique=True)
+    expires_at = Column(DateTime, nullable=False)
+    used_at    = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(_in_check(ACCOUNT_TOKEN_PURPOSES), name="valid_purpose"),
+    )
 
 
 # ─────────────────────────────────────────────────────────────

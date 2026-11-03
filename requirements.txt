@@ -4,3 +4,4 @@ sqlalchemy==2.1.6
 pydantic==2.14.2
 alembic==1.20.1
 PyJWT==2.15.1
+redis==5.2.1

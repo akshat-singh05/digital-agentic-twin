@@ -256,6 +256,7 @@ def seed(reset: bool = False, random_seed: int = 42):
                 email=email,
                 phone=user_data["phone"],
                 password_hash=password_hash,
+                email_verified_at=datetime.utcnow(),      # demo accounts need no confirmation email
             )
             db.add(user)
             db.flush()
@@ -313,7 +314,7 @@ def seed(reset: bool = False, random_seed: int = 42):
         # Admin last, so demo users keep ids 1–5
         if not db.query(User).filter(User.email == ADMIN_EMAIL).first():
             db.add(User(name="Demo Admin", email=ADMIN_EMAIL, role="admin",
-                        password_hash=password_hash))
+                        password_hash=password_hash, email_verified_at=datetime.utcnow()))
 
         db.commit()
 

@@ -21,13 +21,14 @@ os.environ.setdefault("LOG_LEVEL", "WARNING")
 os.environ["SECRET_KEY"] = "test-secret-key-not-for-production"
 os.environ["RATE_LIMIT_PER_MINUTE"] = "0"
 os.environ["LOGIN_RATE_LIMIT_PER_MINUTE"] = "0"
+os.environ["MAIL_MODE"] = "memory"
 
 TEST_PASSWORD = "correct-horse-battery"
 
 import pytest
 from fastapi.testclient import TestClient
 
-from app.core import rate_limit
+from app.core import mailer, rate_limit
 from app.database import Base, engine
 from app.db_migrations import migrate_to_head
 from app.main import app
@@ -48,6 +49,7 @@ def fresh_db(migrated_db):
             conn.execute(table.delete())
     random.seed(1234)
     rate_limit.reset()
+    mailer.outbox.clear()
     yield
 
 

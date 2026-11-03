@@ -22,11 +22,13 @@ Response contract:
 
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 
+from app import config
 from app.config import ACCESS_TOKEN_MINUTES
 from app.core.errors import ConflictError, ConsentRequiredError
+from app.core import mailer
 from app.core.logger import get_logger
 from app.core.security import authorize, create_access_token, get_current_user, require_admin
 from app.database import get_db
@@ -37,6 +39,10 @@ from app.schemas import (
     RegisterRequest,
     AdminUserCreate,
     LoginRequest,
+    ForgotPasswordRequest,
+    ResetPasswordRequest,
+    VerifyEmailRequest,
+    ChangePasswordRequest,
     TokenOut,
     SubscriptionCreate,
     SubscriptionOut,
@@ -57,7 +63,7 @@ from app.schemas import (
     AgentRunOut,
 )
 from app.services import (
-    catalog_service, recommendation_service, run_service, subscription_service, user_service,
+    account_service, catalog_service, recommendation_service, run_service, subscription_service, user_service,
 )
 from app.modules.privacy_mediator.service import list_consents, set_consent
 from app.modules.usage_analyzer.service import analyze_user_usage
@@ -155,9 +161,15 @@ def _audit_sign_in(db: Session, user_id: int, outcome: str, request: Request) ->
         logger.exception("Could not audit sign-in event for user %s", user_id)
 
 
+def _queue_verification_email(db: Session, user: User, background: BackgroundTasks) -> None:
+    token = account_service.issue_token(db, user, "verify")
+    message = mailer.verify_email_message(user.name, account_service.link_for("verify", token))
+    background.add_task(mailer.send_mail, user.email, message["subject"], message["body"])
+
+
 def _token_response(user: User) -> dict:
     return {
-        "access_token": create_access_token(user.id),
+        "access_token": create_access_token(user.id, token_version=user.token_version),
         "token_type": "bearer",
         "expires_in": ACCESS_TOKEN_MINUTES * 60,
         "user": user,
@@ -170,13 +182,20 @@ def _token_response(user: User) -> dict:
     status_code=201,
     tags=["Authentication"],
 )
-def register(payload: RegisterRequest, request: Request, db: Session = Depends(get_db)):
-    """Create an account (role "user") and return an access token.  409 if the email is taken."""
+def register(payload: RegisterRequest, request: Request, background: BackgroundTasks,
+             db: Session = Depends(get_db)):
+    """
+    Create an account (role "user") and return an access token.  409 if the email is taken.
+
+    A confirmation email is sent.  With ``REQUIRE_EMAIL_VERIFICATION`` the
+    account cannot sign in again until the address is confirmed.
+    """
     try:
         user = user_service.create_user(db, payload.model_dump())
     except ValueError as e:
         raise HTTPException(status_code=409, detail={"status": "error", "message": str(e)})
     _audit_sign_in(db, user.id, "registered", request)
+    _queue_verification_email(db, user, background)
     return {"status": "success", "data": _token_response(user)}
 
 
@@ -195,7 +214,7 @@ def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)
     """
     user = user_service.authenticate(db, payload.email, payload.password)
     if user is None:
-        logger.warning("Failed login for %s", payload.email)
+        logger.warning("Failed login for %s", mailer.mask_email(payload.email))
         known = user_service.get_user_by_email(db, payload.email.strip().lower())
         if known is not None:
             _audit_sign_in(db, known.id, "failed", request)
@@ -204,8 +223,115 @@ def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)
             detail={"status": "error", "message": "Invalid email or password"},
             headers={"WWW-Authenticate": "Bearer"},
         )
+    if config.REQUIRE_EMAIL_VERIFICATION and not user.email_verified:
+        raise HTTPException(
+            status_code=403,
+            detail={"status": "error",
+                    "message": "Confirm your email address first: open the link in the email we sent you"},
+        )
     _audit_sign_in(db, user.id, "success", request)
     return {"status": "success", "data": _token_response(user)}
+
+
+_RESET_ASKED = "If that address has an account, an email with a reset link is on its way."
+_BAD_LINK = "This link is invalid or has expired; ask for a new one."
+
+
+@router.post(
+    "/auth/forgot-password",
+    response_model=SuccessResponse[dict],
+    status_code=202,
+    tags=["Authentication"],
+)
+def forgot_password(payload: ForgotPasswordRequest, background: BackgroundTasks,
+                    db: Session = Depends(get_db)):
+    """
+    Email a single-use password-reset link (valid ``RESET_TOKEN_MINUTES``).
+
+    The answer is the same whether or not the address has an account, so this
+    cannot be used to find out who is registered.  Rate limited per client.
+    """
+    found = account_service.request_password_reset(db, payload.email)
+    if found is not None:
+        user, token = found
+        message = mailer.reset_email(user.name, account_service.link_for("reset", token))
+        background.add_task(mailer.send_mail, user.email, message["subject"], message["body"])
+    return {"status": "success", "data": {"message": _RESET_ASKED}}
+
+
+@router.post(
+    "/auth/reset-password",
+    response_model=SuccessResponse[dict],
+    tags=["Authentication"],
+)
+def reset_password(payload: ResetPasswordRequest, request: Request, db: Session = Depends(get_db)):
+    """
+    Set a new password with the token from the email.  The link works once,
+    signs the account out everywhere, and confirms the email address.
+    """
+    user = account_service.reset_password(db, payload.token, payload.new_password)
+    if user is None:
+        raise HTTPException(status_code=400, detail={"status": "error", "message": _BAD_LINK})
+    _audit_sign_in(db, user.id, "password_reset", request)
+    return {"status": "success", "data": {"message": "Password updated; sign in with the new one."}}
+
+
+@router.post(
+    "/auth/verify-email",
+    response_model=SuccessResponse[dict],
+    tags=["Authentication"],
+)
+def verify_email(payload: VerifyEmailRequest, request: Request, db: Session = Depends(get_db)):
+    """Confirm an email address with the token from the email (single use)."""
+    user = account_service.verify_email(db, payload.token)
+    if user is None:
+        raise HTTPException(status_code=400, detail={"status": "error", "message": _BAD_LINK})
+    _audit_sign_in(db, user.id, "email_verified", request)
+    return {"status": "success", "data": {"message": "Email address confirmed."}}
+
+
+@router.post(
+    "/auth/resend-verification",
+    response_model=SuccessResponse[dict],
+    status_code=202,
+    tags=["Authentication"],
+)
+def resend_verification(background: BackgroundTasks, db: Session = Depends(get_db), current: User = _Auth):
+    """Send the signed-in user a fresh confirmation email (earlier links stop working)."""
+    if current.email_verified:
+        return {"status": "success", "data": {"message": "Your email address is already confirmed."}}
+    _queue_verification_email(db, current, background)
+    return {"status": "success", "data": {"message": "Confirmation email sent."}}
+
+
+@router.post(
+    "/auth/change-password",
+    response_model=SuccessResponse[TokenOut],
+    tags=["Authentication"],
+)
+def change_password(payload: ChangePasswordRequest, request: Request, db: Session = Depends(get_db),
+                    current: User = _Auth):
+    """
+    Change the signed-in user's password.  Every other session is signed out;
+    the response carries a new token for this one.
+    """
+    if not account_service.change_password(db, current, payload.current_password, payload.new_password):
+        raise HTTPException(status_code=403,
+                            detail={"status": "error", "message": "The current password is not correct"})
+    _audit_sign_in(db, current.id, "password_changed", request)
+    return {"status": "success", "data": _token_response(current)}
+
+
+@router.post(
+    "/auth/logout-all",
+    response_model=SuccessResponse[dict],
+    tags=["Authentication"],
+)
+def logout_all(request: Request, db: Session = Depends(get_db), current: User = _Auth):
+    """Sign out everywhere: every token issued so far, including this one, stops working."""
+    account_service.sign_out_everywhere(db, current)
+    _audit_sign_in(db, current.id, "signed_out_everywhere", request)
+    return {"status": "success", "data": {"message": "Signed out everywhere."}}
 
 
 @router.get(
