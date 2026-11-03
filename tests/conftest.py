@@ -100,6 +100,19 @@ def approve(client, recommendation_id):
     return res.json()["data"]
 
 
+def agree_price(client, user_id, factor=0.9):
+    """
+    Prepare a negotiation brief (unless one is open) and report that the
+    provider accepted ``factor`` x today's price.  Returns the updated brief.
+    """
+    open_briefs = client.get(f"/api/negotiation/briefs/user/{user_id}?status=open").json()["data"]
+    brief = open_briefs[0] if open_briefs else client.post(f"/api/negotiate/{user_id}").json()["data"]
+    res = client.post(f"/api/negotiation/briefs/{brief['id']}/outcome", json={
+        "outcome": "accepted", "agreed_price": round(brief["current_cost"] * factor, 2)})
+    assert res.status_code == 200, res.text
+    return res.json()["data"]
+
+
 def make_subscription(client, user_id, provider="Jio", plan_name="Gold 599",
                       monthly_cost=599.0, data_limit_gb=100.0, call_minutes_limit=500):
     res = client.post("/api/subscriptions", json={

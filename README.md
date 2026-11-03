@@ -20,9 +20,9 @@
 
 **Agentic Digital Twin** is an intelligent backend system that acts as a user's autonomous representative for managing subscriptions (Jio, Airtel, Netflix, AWS, etc.).
 
-It analyzes usage patterns, protects user privacy (consent gates + differential privacy), negotiates prices against a **built-in provider simulator**, validates proposed changes against KPIs and SLA risk, and keeps an explainable audit trail of every decision. Consequential changes are **proposed, not applied**: the user approves or rejects each one.
+It analyzes usage patterns, protects user privacy (consent gates + differential privacy), prepares negotiation briefs for you to take to your provider, validates proposed changes against KPIs and SLA risk, and keeps an explainable audit trail of every decision. Consequential changes are **proposed, not applied**: the user approves or rejects each one.
 
-> **Simulation notice:** there are no real provider integrations. Negotiation outcomes come from a simulator and are labelled `simulated: true`; the plan catalog is demo data.
+> **What is and is not automated:** the twin contacts **no provider**. It prepares a negotiation brief (what to ask for, a draft message) and you report the answer; the plan catalog is demo data until you import real prices.
 
 > **Why it is built this way:** see [Design decisions](docs/DESIGN.md) — the consent gate, proposals instead of actions, the walk-away price and more.
 
@@ -58,16 +58,17 @@ Applies differential privacy (Laplace mechanism) to sanitize sensitive usage dat
 - Zero-clamping to prevent negative values
 - Raw data never leaves the privacy boundary
 
-### 3. 🤝 Negotiation Agent (simulated provider)
-Multi-round price negotiation against a **built-in provider simulator** — there is no real provider.
+### 3. 🤝 Negotiation Coach
+Prepares what **you** can say to your provider. Nothing is sent; no provider is contacted.
 
-- **Walk-away price**: never agrees to pay more than 95% of today's price, or more than the best catalog alternative costs (the user's BATNA)
-- Strategy adapts to utilisation; deal when within 3% and at or below the walk-away price
-- **Reproducible**: seeded per subscription and session, so every outcome can be replayed
-- Runs only for underutilized plans; full round history persisted
+- **A brief** for an underutilized plan: what to ask for, the **walk-away price** (at least 5% below today's price, and never above the best catalog alternative — your best alternative to a deal), the facts that support the request, and a fallback
+- **A draft message** with the numbers filled in; usage figures appear in it (rounded) only if you granted `share_usage_with_provider`
+- **You report the answer** — accepted at ₹X, declined, or not pursued. It is your own statement and is not verified
+- A reported price can then be **proposed** as a change for your approval, like any other proposal
+- Rules of thumb, not predictions: a provider may offer less or decline
 
 ### 4. 🔄 Plan Switching with Approval and Rollback
-Compares the negotiated price with the best **catalog alternative** and **proposes** the bigger saving.
+Compares a price you reported the provider agreed to (if any) with the best **catalog alternative** and **proposes** the bigger saving.
 
 - **Alternatives**: catalog plans must cover peak/projected usage + 10% headroom and respect the user's preferences (budget, minimum data/minutes, required features, provider rules); every excluded plan comes with its reasons (`GET /api/subscriptions/{id}/alternatives`)
 - **Savings** are measured against the effective current cost (price + average overage), so a bigger plan can be the cheaper option
@@ -90,7 +91,7 @@ Generates deterministic, human-readable explanations for every decision the syst
 
 - Order: Analyze → Sanitize → Negotiate → Propose; every agent audits its own decision
 - Privacy Mediator gate: a missing consent **skips** that agent (and the steps that need it) and is audited as `access_denied`
-- No repeat negotiation while a proposal for that subscription awaits a decision
+- No new brief while one awaits your answer, an accepted price awaits a proposal, or you recently declined or dismissed one; no new proposal while one awaits a decision
 - Every run and step (status, timing, summary, error) is stored and served at `/api/runs/{run_id}`
 - A failing agent is rolled back and recorded; independent steps still run
 - Final status: `awaiting_approval` / `completed` / `partial` / `failed`
@@ -124,7 +125,7 @@ flowchart LR
         direction TB
         PM["Privacy Mediator<br/>consent gate + Laplace noise"]
         UA["Usage Analyzer"]
-        NA["Negotiation Agent<br/>(simulated provider)"]
+        NA["Negotiation Coach<br/>(briefs; contacts no provider)"]
         PS["Plan Switching<br/>proposals, approval, rollback"]
         AL["Audit Logger"]
     end
@@ -200,9 +201,9 @@ sequenceDiagram
 | Differential privacy | **Real, basic** | Laplace noise per call. There is no privacy-budget accounting. |
 | Plan catalog | **Demo data, replaceable** | Seeded as `source: "demo_seed"`, not live pricing. An admin can import real plans from CSV (`source: "imported"`) — but the prices are whatever you type in; nothing is fetched from providers. |
 | Your usage data | **Real, entered by you** | Added by hand or imported from CSV; there is no bill or provider connection. |
-| Provider negotiation | **Simulated** | A seeded simulator, labelled `simulated: true`. No provider is contacted. |
+| Provider negotiation | **Prepared, not performed** | The twin writes a brief and a draft; **you** contact the provider and report the answer (unverified). No provider is contacted. |
 | Applying a plan change | **Updates the twin's own records only** | Approval changes the subscription row in this database; nothing is sent to a provider. |
-| Real provider APIs, ML analysis, RL negotiation | **Planned** | See *Future Enhancements*. |
+| Real provider APIs, ML analysis | **Planned** | See *Future Enhancements*. |
 
 ---
 
@@ -248,7 +249,7 @@ digital-agentic-twin/
 │   │   │   └── service.py       # DB orchestration
 │   │   │
 │   │   ├── negotiation_agent/
-│   │   │   ├── engine.py        # Pure negotiation logic (stateless)
+│   │   │   ├── brief.py         # Pure brief logic: asks, walk-away price, draft (stateless)
 │   │   │   └── service.py       # DB orchestration
 │   │   │
 │   │   ├── plan_switching/
@@ -311,9 +312,9 @@ All endpoints are prefixed with `/api`. Every endpoint except register/login nee
 ```
 
 The pipeline acts on a single **optimization target**: the most underutilized active
-subscription. Negotiation and switching both run against it. When no subscription is
-underutilized they are skipped (`"skipped"` in the response). A switch is only ever
-*proposed* for a price the provider **accepted**, never for a higher price at the same capacity.
+subscription. The negotiation brief and switching both run against it. When no subscription is
+underutilized they are skipped (`"skipped"` in the response). A negotiated price is only ever
+*proposed* when **you reported** that the provider accepted it, and never for a higher price at the same capacity.
 
 ### Authentication & Access
 
@@ -360,8 +361,11 @@ underutilized they are skipped (`"skipped"` in the response). A switch is only e
 |--------|----------|-------------|
 | `POST` | `/api/analyze/{user_id}` | Run usage analysis (consent: `usage_analysis`) |
 | `POST` | `/api/sanitize/{user_id}` | Get sanitized (private) usage data (consent: `share_usage_with_provider`) |
-| `POST` | `/api/negotiate/{user_id}` | Simulated price negotiation (consents: all three above) |
-| `POST` | `/api/switch/{user_id}` | Evaluate the latest deal and **propose** a change (nothing is applied) |
+| `POST` | `/api/negotiate/{user_id}` | **Prepare a negotiation brief** (what to ask for, walk-away price, draft message); contacts nobody (consents: `usage_analysis`, `negotiate_on_behalf`; `share_usage_with_provider` only adds usage figures to the draft) |
+| `GET` | `/api/negotiation/briefs/user/{user_id}` | A user's briefs (`?status=open`) |
+| `GET` | `/api/negotiation/briefs/{brief_id}` | One brief with evidence, draft and outcome |
+| `POST` | `/api/negotiation/briefs/{brief_id}/outcome` | Report the provider's answer: `accepted` (with the agreed price), `declined`, or `dismissed` |
+| `POST` | `/api/switch/{user_id}` | Evaluate a reported deal and the catalog and **propose** a change (nothing is applied) |
 | `GET` | `/api/recommendations/user/{user_id}` | List proposals (`?status=proposed`) |
 | `GET` | `/api/recommendations/{id}` | One proposal with rationale and evidence |
 | `POST` | `/api/recommendations/{id}/approve` | Apply it (consent: `execute_plan_changes`) |
@@ -369,7 +373,6 @@ underutilized they are skipped (`"skipped"` in the response). A switch is only e
 | `POST` | `/api/subscriptions/{sub_id}/rollback` | Undo the last applied change (consent: `execute_plan_changes`) |
 | `GET` | `/api/audit/{user_id}` | Get explainable audit logs |
 | `GET` | `/api/audit/user/{user_id}` | Get audit logs (alternate) |
-| `GET` | `/api/negotiation/{sub_id}/history` | Get negotiation round history |
 
 ### Unified Pipeline
 
@@ -482,8 +485,9 @@ real subscriptions, then bring in your usage and real plan prices:
    seeded demo plans* ticked. Columns: `provider, plan_name, category, monthly_cost` and optionally
    `data_limit_gb, call_minutes_limit` (blank = unlimited), `features` (`5g;hotspot`), `is_available`.
    See [docs/samples/plans.csv](docs/samples/plans.csv). **You** type in the prices, so keep them current.
-3. Run a decision cycle. The analysis and alternatives now use your numbers. Negotiation is still a
-   simulation (see the *Known limitations*), and approving a change only updates this app — you still
+3. Run a decision cycle. The analysis and alternatives now use your numbers. The twin does not
+   contact your provider: the *Negotiation Coach* page gives you a brief and a draft message to send
+   yourself, and you report the answer there. Approving a change only updates this app — you still
    switch the plan with the provider yourself.
 
 ### 9. Run with Docker
@@ -541,7 +545,7 @@ curl -X POST http://127.0.0.1:8000/api/run-cycle/2 -H "Authorization: Bearer <to
     "user_id": 2,
     "analysis": { "recommendation": "downgrade", "efficiency": 0.195, "binding_metric": "calls", "optimization_target": { "subscription_id": 4 } },
     "sanitization": { "sanitized_usage": [] },
-    "negotiation": { "status": "final", "reservation_price": 449.0, "best_alternative": { "plan_name": "Hero 449" }, "simulated": true },
+    "negotiation": { "id": 1, "status": "open", "opening_ask": 449.0, "walk_away_price": 449.0, "contacts_provider": false },
     "switching": { "proposed": true, "action": "switch_plan", "recommendation_id": 1, "proposed_plan": { "plan_name": "Hero 449" }, "risk_flag": "low" },
     "recommendation": { "recommendation_id": 1, "action": "switch_plan", "current_cost": 599.0, "projected_cost": 449.0, "estimated_monthly_savings": 150.0, "explanation": { "what": "Switch from Vi Max 599 to Vi Hero 449 at ₹449.0/month.", "benefits": ["..."], "drawbacks": ["..."] } },
     "audit_logged": ["analysis", "negotiation", "switching"],
@@ -558,10 +562,13 @@ curl -X POST http://127.0.0.1:8000/api/run-cycle/2 -H "Authorization: Bearer <to
 curl -X POST http://127.0.0.1:8000/api/analyze/2
 ```
 
-### Negotiate a Better Price
+### Prepare a Negotiation Brief, then Report the Answer
 
 ```bash
-curl -X POST http://127.0.0.1:8000/api/negotiate/2
+curl -X POST http://127.0.0.1:8000/api/negotiate/2        # nothing is sent to anyone
+curl -X POST http://127.0.0.1:8000/api/negotiation/briefs/1/outcome \
+  -H "Content-Type: application/json" \
+  -d '{"outcome": "accepted", "agreed_price": 539.1, "note": "chat with support"}'
 ```
 
 ### Propose a Switch, then Decide
@@ -634,7 +641,7 @@ curl -X POST http://127.0.0.1:8000/api/usage \
 | `users` | Registered users | — |
 | `subscriptions` | A user's current plan and terms | `user_id` → users, `catalog_plan_id` → plan_catalog |
 | `usage_data` | Per-period consumption | `user_id` → users, `subscription_id` → subscriptions |
-| `negotiation_history` | One row per negotiation round | `subscription_id` → subscriptions |
+| `negotiation_briefs` | A brief, its draft, and the outcome you reported | `user_id` → users, `subscription_id` → subscriptions, `run_id` → agent_runs |
 | `audit_logs` | Plain-English record of every decision | `user_id` → users, `run_id` → agent_runs |
 | `plan_catalog` | Plans providers offer (the alternatives) | unique (`provider`, `plan_name`) |
 | `user_preferences` | Budget, minimums, required features (1:1) | `user_id` → users |
@@ -677,7 +684,7 @@ These are properties of the code as it stands, not planned behaviour.
 
 **Scope**
 - Everything you enter (usage, plan prices) comes from you, as a form or CSV. Nothing is pulled from a bill, a provider or an app, so the analysis is only as current as your last import.
-- Negotiation is simulated and the catalog is demo data (see the table above). Approving a change does not change anything at a real provider.
+- The twin contacts no provider: negotiation is a brief you send yourself, and the answer is your own unverified report. The catalog is demo data until you import real prices (see the table above). Approving a change does not change anything at a real provider.
 - The analyzer is rule-based. Its "savings" are computed from the stored records and the catalog; they are not forecasts of real bills.
 
 **Security and accounts**
@@ -707,7 +714,7 @@ These are properties of the code as it stands, not planned behaviour.
 |------|-------------|
 | **ML-Powered Analysis** | Replace rule-based analyzer with a trained model for smarter recommendations |
 | **Real Provider APIs** | Integrate with Jio / Airtel / AWS billing APIs for live data ingestion |
-| **Reinforcement Learning** | Train the negotiation agent using RL for optimal offer strategies |
+| **Smarter briefs** | Tune the suggested asks from the outcomes users report (needs real outcome data) |
 | **Stronger Privacy** | Implement ε-differential privacy with formal privacy budgets |
 | **Multi-User Scheduling** | Cron-based batch processing to run pipelines for all users periodically |
 | **PostgreSQL** | Verify migrations and tests on PostgreSQL for multi-user deployments |

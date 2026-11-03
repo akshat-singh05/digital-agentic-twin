@@ -1,4 +1,4 @@
-"""Phase D: usage metrics, deterministic negotiation, catalog alternatives,
+"""Phase D: usage metrics, negotiation briefs, catalog alternatives,
 and evidence-backed proposals."""
 
 from datetime import datetime
@@ -6,13 +6,11 @@ from types import SimpleNamespace
 
 import pytest
 
-import app.modules.negotiation_agent.engine as engine
 from app.database import SessionLocal
 from app.models import PlanCatalog
-from app.modules.negotiation_agent.engine import negotiate
 from app.modules.plan_switching.alternatives import describe_tradeoffs, rank_alternatives
 from app.modules.usage_analyzer.analyzer import analyze_usage
-from tests.conftest import approve, get_subscription, make_subscription, make_user
+from tests.conftest import agree_price, approve, get_subscription, make_subscription, make_user
 
 
 # ─────────────────────────────────────────────────────────────
@@ -92,28 +90,6 @@ def test_unused_spend_is_reported_not_called_savings():
     result = analyze_usage(_records([20] * 6), _plan())
     assert result["unused_spend"] == 479.2
     assert "savings_estimate" not in result
-
-
-# ── Negotiation engine ───────────────────────────────────────
-def test_same_seed_gives_the_same_negotiation():
-    assert negotiate(599, 0.2, seed="7:1") == negotiate(599, 0.2, seed="7:1")
-    assert negotiate(599, 0.2, seed="7:1") != negotiate(599, 0.2, seed="7:2")
-
-
-@pytest.mark.parametrize("seed", range(25))
-def test_agent_never_offers_above_its_walk_away_price(seed):
-    result = negotiate(599, 0.2, reservation_price=500, seed=seed)
-    assert all(r["agent_offer"] <= 500 for r in result["rounds"])
-    if result["status"] == "accepted":
-        assert result["final_price"] <= 500
-    else:
-        assert result["savings_pct"] == 0.0
-
-
-def test_unreachable_walk_away_price_means_no_deal():
-    result = negotiate(599, 0.2, reservation_price=200, seed=1)
-    assert result["status"] == "final" and result["reservation_price"] == 200
-    assert "walk-away" in result["rounds"][-1]["notes"]
 
 
 # ── Alternatives ranker ──────────────────────────────────────
@@ -206,8 +182,7 @@ def jio_catalog():
                          ("Jio", "Silver", 399.0, 50.0, 300, '{"5g": false}'))
 
 
-def test_cycle_proposes_a_cheaper_catalog_plan_with_explanation(client, monkeypatch, jio_catalog):
-    monkeypatch.setattr(engine, "_is_accepted", lambda offer, counter: False)   # no deal
+def test_cycle_proposes_a_cheaper_catalog_plan_with_explanation(client, jio_catalog):
     uid = make_user(client)
     sub = client.post("/api/subscriptions", json={   # linked: inherits Gold's 5G feature
         "user_id": uid, "provider": "Jio", "plan_name": "Gold", "monthly_cost": 599.0,
@@ -218,8 +193,9 @@ def test_cycle_proposes_a_cheaper_catalog_plan_with_explanation(client, monkeypa
     data = client.post(f"/api/run-cycle/{uid}").json()["data"]
     rec = client.get(f"/api/recommendations/{data['recommendation']['recommendation_id']}").json()["data"]
 
-    assert data["negotiation"]["status"] == "final"
-    assert data["negotiation"]["reservation_price"] == 399.0          # BATNA = Silver
+    assert data["negotiation"]["status"] == "open"
+    assert data["negotiation"]["walk_away_price"] == 399.0            # best alternative = Silver
+    assert any("Jio Silver" in point for point in data["negotiation"]["leverage"])
     assert data["switching"]["action"] == "switch_plan"
     assert data["switching"]["proposed_plan"]["plan_name"] == "Silver"
     assert rec["proposed_plan_id"] == jio_catalog["Silver"]
@@ -232,24 +208,21 @@ def test_cycle_proposes_a_cheaper_catalog_plan_with_explanation(client, monkeypa
     assert get_subscription(client, sub)["plan_name"] == "Gold"       # nothing applied yet
 
 
-def test_catalog_alternative_caps_the_negotiated_price(client, monkeypatch, jio_catalog):
-    monkeypatch.setattr(engine, "_initial_offer", lambda cost, eff, rng: round(cost * 0.9, 2))
-    monkeypatch.setattr(engine, "_is_accepted", lambda offer, counter: True)
+def test_larger_saving_wins_over_a_reported_price(client, jio_catalog):
     uid = make_user(client)
     sub = make_subscription(client, uid, plan_name="Gold")
     _add_usage(client, uid, sub)
+    agree_price(client, uid)                       # provider agreed to 10% off: ₹539.1
 
     data = client.post(f"/api/run-cycle/{uid}").json()["data"]
 
-    # The negotiated ₹539.1 was capped by the ₹399 walk-away price, so the deal
-    # is ₹399 — the same saving as Silver, so keeping Gold's limits wins the tie.
+    # The reported ₹539.1 saves ₹59.9; switching to Silver (₹399) saves ₹200.
     considered = {o["action"]: o["monthly_savings"] for o in data["switching"]["options_considered"]}
-    assert considered == {"apply_negotiated_price": 200.0, "switch_plan": 200.0}
-    assert data["switching"]["action"] == "apply_negotiated_price"
+    assert considered == {"apply_negotiated_price": 59.9, "switch_plan": 200.0}
+    assert data["switching"]["action"] == "switch_plan"
 
 
-def test_approving_a_plan_switch_moves_to_the_catalog_terms(client, monkeypatch, jio_catalog):
-    monkeypatch.setattr(engine, "_is_accepted", lambda offer, counter: False)
+def test_approving_a_plan_switch_moves_to_the_catalog_terms(client, jio_catalog):
     uid = make_user(client)
     sub = make_subscription(client, uid, plan_name="Gold")
     _add_usage(client, uid, sub)
@@ -267,8 +240,7 @@ def test_approving_a_plan_switch_moves_to_the_catalog_terms(client, monkeypatch,
     assert (restored["plan_name"], restored["monthly_cost"], restored["data_limit_gb"]) == ("Gold", 599.0, 100.0)
 
 
-def test_catalog_price_change_expires_a_plan_switch(client, monkeypatch, jio_catalog):
-    monkeypatch.setattr(engine, "_is_accepted", lambda offer, counter: False)
+def test_catalog_price_change_expires_a_plan_switch(client, jio_catalog):
     uid = make_user(client)
     sub = make_subscription(client, uid, plan_name="Gold")
     _add_usage(client, uid, sub)
@@ -282,8 +254,7 @@ def test_catalog_price_change_expires_a_plan_switch(client, monkeypatch, jio_cat
     assert client.get(f"/api/recommendations/{rec_id}").json()["data"]["status"] == "expired"
 
 
-def test_required_feature_blocks_the_switch(client, monkeypatch, jio_catalog):
-    monkeypatch.setattr(engine, "_is_accepted", lambda offer, counter: False)
+def test_required_feature_blocks_the_switch(client, jio_catalog):
     uid = make_user(client)
     client.put(f"/api/users/{uid}/preferences", json={"required_features": ["5g"]})
     sub = make_subscription(client, uid, plan_name="Gold")
@@ -324,13 +295,17 @@ def test_alternatives_endpoint_explains_every_plan(client, jio_catalog):
     assert client.get(f"/api/subscriptions/{other_sub}/alternatives").status_code == 403
 
 
-def test_negotiation_without_catalog_walks_away_below_five_percent(client):
+def test_brief_without_catalog_asks_for_a_discount_and_stays_below_five_percent(client):
     uid = make_user(client)
     sub = make_subscription(client, uid)
     _add_usage(client, uid, sub)
-    neg = client.post(f"/api/negotiate/{uid}").json()["data"]
-    assert neg["reservation_price"] == 569.05 and neg["best_alternative"] is None
-    assert all(r["agent_offer"] <= 569.05 for r in neg["rounds"])
+
+    brief = client.post(f"/api/negotiate/{uid}").json()["data"]
+
+    assert brief["walk_away_price"] == 569.05           # at least 5% below today's price
+    assert brief["opening_ask"] == 539.1                # no competing plan: ask for 10% off
+    assert any("no competing offer" in point for point in brief["leverage"])
+    assert "keep your current plan" in brief["fallback"]
 
 
 def test_uncapped_subscription_is_not_a_target(client):

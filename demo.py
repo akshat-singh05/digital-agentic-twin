@@ -108,27 +108,20 @@ def print_analysis(data):
 
 
 def print_negotiation(data):
-    """Print negotiation results with round-by-round breakdown."""
-    section("MODULE 3", "AUTONOMOUS NEGOTIATION")
-    kv("Provider", data.get("provider", "—"))
-    kv("Original Cost", f"Rs.{data.get('original_cost', 0)}")
-    kv("Final Price", f"Rs.{data.get('final_price', 0)}")
-    kv("Savings", f"{data.get('savings_pct', 0)}%")
-    kv("Walk-away Price", f"Rs.{data.get('reservation_price', '—')}")
-    kv("Total Rounds", str(data.get("total_rounds", 0)))
-    kv("Outcome", status_label(data.get("status", "unknown")) + " (simulated provider)")
-
-    rounds = data.get("rounds", [])
-    if rounds:
-        print(f"\n      Round-by-Round Breakdown:")
-        print(f"      {'Round':>5s}  {'Agent Offer':>12s}  {'Provider':>12s}  {'Status':>10s}")
-        print(f"      {'─'*5}  {'─'*12}  {'─'*12}  {'─'*10}")
-        for r in rounds:
-            rnd = r.get("round_number", "?")
-            offer = f"Rs.{r.get('agent_offer', 0)}"
-            counter = f"Rs.{r.get('provider_counter', 0)}"
-            st = r.get("status", "?")
-            print(f"      {rnd:>5}  {offer:>12s}  {counter:>12s}  {st:>10s}")
+    """Print the negotiation brief (the twin contacts no provider)."""
+    section("MODULE 3", "NEGOTIATION BRIEF")
+    kv("Plan", f"{data.get('provider', '—')} {data.get('plan_name', '')}")
+    kv("You Pay Now", f"Rs.{data.get('current_cost', 0)}")
+    kv("Ask For", f"Rs.{data.get('opening_ask', 0)}")
+    kv("Walk-away Price", f"Rs.{data.get('walk_away_price', '—')}  (switch rather than pay more)")
+    kv("Status", f"{data.get('status', '—')}  (nothing was sent; you contact the provider)")
+    for point in data.get("leverage", []):
+        print(f"      - {point}")
+    draft = data.get("draft_message")
+    if draft:
+        print("\n      Draft message:")
+        for line in draft.splitlines():
+            print(f"        | {line}")
 
 
 def print_switching(data):
@@ -291,7 +284,7 @@ def main():
     if data.get("analysis"):
         kv("Recommendation", data["analysis"].get("recommendation", "—").upper(), indent=4)
     if data.get("negotiation"):
-        kv("Negotiated Savings", f"{data['negotiation'].get('savings_pct', 0)}%", indent=4)
+        kv("Negotiation Brief", f"ask Rs.{data['negotiation'].get('opening_ask', 0)} (you contact the provider)", indent=4)
     if data.get("switching"):
         kv("Change Proposed", "Yes — approve or reject it" if data["switching"].get("proposed") else "No", indent=4)
 

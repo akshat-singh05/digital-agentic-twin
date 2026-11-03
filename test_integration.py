@@ -82,10 +82,15 @@ def main():
     rec = res["data"].get("recommendation", "unknown")
     print(f"✅ 4. Analysis → recommendation={rec}")
 
-    # 5. Negotiate
+    # 5. Prepare a negotiation brief, then report that the provider agreed to 10% off
     code, res = _post(f"/negotiate/{uid}")
     neg = res["data"]
-    print(f"✅ 5. Negotiation → status={neg['status']}, final_price={neg['final_price']}, rounds={neg['total_rounds']}")
+    assert neg["contacts_provider"] is False and neg["status"] == "open", neg
+    print(f"✅ 5. Negotiation brief → ask ₹{neg['opening_ask']}, walk away above ₹{neg['walk_away_price']}")
+    agreed = round(neg["current_cost"] * 0.9, 2)
+    code, res = _post(f"/negotiation/briefs/{neg['id']}/outcome", {"outcome": "accepted", "agreed_price": agreed})
+    assert res["data"]["status"] == "accepted", res
+    print(f"       reported accepted price ₹{agreed}")
 
     # 6. Propose a switch, then approve it (nothing changes before approval)
     code, res = _post(f"/switch/{uid}")
@@ -109,7 +114,7 @@ def main():
 
     # === Edge case: evaluate again — nothing new should be proposed ===
     # After a switch the plan usually fits (409: no opportunity left);
-    # otherwise the stale negotiation must not be re-applied (proposed=False).
+    # otherwise the already-applied reported price must not be re-applied (proposed=False).
     print(f"\n✅ 8. Second switch evaluation:")
     try:
         code2, res2 = _post(f"/switch/{uid}")
@@ -128,16 +133,16 @@ def main():
     except urllib.error.HTTPError as e:
         print(f"✅ 9. No-subscription edge case → HTTP {e.code}")
 
-    # === Edge case: user with subscription but no negotiation ===
+    # === Edge case: user with subscription but no reported provider offer ===
     _post("/subscriptions", {
         "user_id": uid2, "provider": "Airtel", "plan_name": "Basic",
         "monthly_cost": 299.0, "data_limit_gb": 50.0, "call_minutes_limit": 200,
     })
     try:
         _post(f"/switch/{uid2}")
-        print("❌ 10. Expected error for user with no negotiation!")
+        print("❌ 10. Expected error for user with no reported offer!")
     except urllib.error.HTTPError as e:
-        print(f"✅ 10. No-negotiation edge case → HTTP {e.code}")
+        print(f"✅ 10. No-reported-offer edge case → HTTP {e.code}")
 
     # === Access control: user 2 cannot see user 1's audit trail ===
     try:

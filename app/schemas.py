@@ -10,7 +10,7 @@ Conventions:
 
 import json
 from datetime import datetime
-from typing import Any, Dict, Generic, List, Optional, TypeVar
+from typing import Any, Dict, Generic, List, Literal, Optional, TypeVar
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -244,29 +244,39 @@ class UsageDataOut(BaseModel):
 # ─────────────────────────────────────────────────────────────
 # Negotiation Schemas
 # ─────────────────────────────────────────────────────────────
-class NegotiationRoundOut(BaseModel):
-    """A single round in a negotiation session."""
+class NegotiationBriefOut(BaseModel):
+    """What to ask a provider for, with a draft message.  The twin contacts nobody."""
     id: int
-    subscription_id: int
-    round_number: int
-    agent_offer: float
-    provider_counter: Optional[float] = None
-    status: str
-    notes: Optional[str] = None
-    created_at: datetime
-
-    model_config = {"from_attributes": True}
-
-
-class NegotiationSessionOut(BaseModel):
-    """Aggregated view returned after a full negotiation run."""
+    user_id: int
     subscription_id: int
     provider: str
-    original_cost: float
-    final_offer: float
-    savings_pct: float
-    rounds: List[NegotiationRoundOut]
-    outcome: str  # accepted | rejected
+    plan_name: str
+    run_id: Optional[int] = None
+    status: str                       # open | accepted | declined | dismissed
+    current_cost: float
+    effective_cost: float
+    opening_ask: float
+    walk_away_price: float
+    evidence: dict
+    leverage: List[str]
+    fallback: str
+    caveats: List[str]
+    draft_message: str
+    included_usage: bool
+    agreed_price: Optional[float] = None
+    outcome_note: Optional[str] = None
+    reported_at: Optional[datetime] = None
+    created_at: datetime
+    contacts_provider: bool = False
+
+
+class BriefOutcomeRequest(BaseModel):
+    """The provider's answer, as the user reports it."""
+    outcome: Literal["accepted", "declined", "dismissed"]
+    agreed_price: Optional[float] = Field(
+        None, gt=0, description="Agreed monthly price (required when accepted)",
+    )
+    note: Optional[str] = Field(None, max_length=500)
 
 
 # ─────────────────────────────────────────────────────────────

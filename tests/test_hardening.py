@@ -7,21 +7,21 @@ from app import config
 from app.database import SessionLocal
 from app.models import Recommendation
 from app.modules.plan_switching.service import _recently_rejected
-from tests.conftest import TEST_PASSWORD, as_user, make_user
-from tests.test_orchestrator import _forced_deal, _underutilized_user
+from tests.conftest import TEST_PASSWORD, agree_price, as_user, make_user
+from tests.test_orchestrator import _underutilized_user
 
 
 # ── Rejection cool-down ──────────────────────────────────────
-def _rejected_proposal(client, monkeypatch):
-    _forced_deal(monkeypatch)
+def _rejected_proposal(client):
     uid, sub = _underutilized_user(client)
+    agree_price(client, uid)
     rec_id = client.post(f"/api/run-cycle/{uid}").json()["data"]["recommendation"]["recommendation_id"]
     assert client.post(f"/api/recommendations/{rec_id}/reject").status_code == 200
     return uid, sub, rec_id
 
 
 def test_rejected_proposal_is_not_offered_again_unchanged(client, monkeypatch):
-    uid, sub, rec_id = _rejected_proposal(client, monkeypatch)
+    uid, sub, rec_id = _rejected_proposal(client)
 
     again = client.post(f"/api/switch/{uid}").json()["data"]
 
@@ -32,7 +32,7 @@ def test_rejected_proposal_is_not_offered_again_unchanged(client, monkeypatch):
 
 
 def test_run_cycle_respects_the_cool_down(client, monkeypatch):
-    uid, sub, rec_id = _rejected_proposal(client, monkeypatch)
+    uid, sub, rec_id = _rejected_proposal(client)
 
     run = client.post(f"/api/run-cycle/{uid}").json()["data"]
 
@@ -41,7 +41,7 @@ def test_run_cycle_respects_the_cool_down(client, monkeypatch):
 
 
 def test_proposal_returns_after_the_cool_down(client, monkeypatch):
-    uid, sub, rec_id = _rejected_proposal(client, monkeypatch)
+    uid, sub, rec_id = _rejected_proposal(client)
     with SessionLocal() as db:
         rec = db.get(Recommendation, rec_id)
         rec.decided_at = datetime.now(timezone.utc) - timedelta(days=config.REJECTION_COOLDOWN_DAYS + 1)
@@ -51,14 +51,14 @@ def test_proposal_returns_after_the_cool_down(client, monkeypatch):
 
 
 def test_cool_down_can_be_disabled(client, monkeypatch):
-    uid, sub, rec_id = _rejected_proposal(client, monkeypatch)
+    uid, sub, rec_id = _rejected_proposal(client)
     monkeypatch.setattr(config, "REJECTION_COOLDOWN_DAYS", 0)
 
     assert client.post(f"/api/switch/{uid}").json()["data"]["proposed"] is True
 
 
 def test_different_terms_are_never_held_back(client, monkeypatch):
-    uid, sub, rec_id = _rejected_proposal(client, monkeypatch)
+    uid, sub, rec_id = _rejected_proposal(client)
     with SessionLocal() as db:
         rec = db.get(Recommendation, rec_id)
         same = {"action": rec.action, "proposed_cost": rec.proposed_cost,

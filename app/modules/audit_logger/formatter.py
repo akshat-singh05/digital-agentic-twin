@@ -82,32 +82,38 @@ def _format_analysis(payload: Dict[str, Any]) -> str:
 
 def _format_negotiation(payload: Dict[str, Any]) -> str:
     """
-    Generate an explanation for a negotiation outcome.
+    Explanation for a negotiation brief or the outcome the user reported.
+
+    The twin contacts no provider; a brief is what the user can ask for, and
+    an outcome is the user's own report of the answer.
 
     Expected payload keys:
-        total_rounds, savings_pct, status, original_cost,
-        final_price, provider
+        kind ("brief" | "outcome"), provider, plan_name, brief_id, and
+        opening_ask / walk_away_price (brief) or outcome / agreed_price /
+        current_cost (outcome)
     """
-    total_rounds = _safe_get(payload, "total_rounds", 0)
-    savings_pct = _safe_get(payload, "savings_pct", 0)
-    status = _safe_get(payload, "status", "unknown")
-    original = _safe_get(payload, "original_cost", 0)
-    final = _safe_get(payload, "final_price", 0)
     provider = _safe_get(payload, "provider", "unknown")
+    plan = _safe_get(payload, "plan_name", "unknown")
+    brief_id = _safe_get(payload, "brief_id", "?")
 
-    if status == "accepted":
-        return (
-            f"Negotiation accepted after {total_rounds} round(s) with {provider}, "
-            f"{savings_pct}% discount achieved "
-            f"(₹{original} → ₹{final})."
-        )
-    else:
-        reservation = payload.get("reservation_price")
-        walk_away = f" No deal within the walk-away price of ₹{reservation}." if reservation else ""
-        return (
-            f"Negotiation {status} after {total_rounds} round(s) with {provider}. "
-            f"Provider's last counter ₹{final} vs original ₹{original}.{walk_away}"
-        )
+    if _safe_get(payload, "kind", "brief") == "outcome":
+        outcome = _safe_get(payload, "outcome", "unknown")
+        if outcome == "accepted":
+            return (
+                f"You reported that {provider} accepted ₹{payload.get('agreed_price')}/month on "
+                f"{plan} (was ₹{_safe_get(payload, 'current_cost', 0)}) — brief #{brief_id}."
+            )
+        if outcome == "declined":
+            return f"You reported that {provider} declined your request on {plan} — brief #{brief_id}."
+        return f"You did not pursue negotiation brief #{brief_id} for {provider} {plan}."
+
+    usage = "with" if _safe_get(payload, "included_usage", False) else "without"
+    return (
+        f"Negotiation brief #{brief_id} prepared for {provider} {plan}: ask for "
+        f"₹{_safe_get(payload, 'opening_ask', 0)}, switch rather than pay above "
+        f"₹{_safe_get(payload, 'walk_away_price', 0)} (draft {usage} usage figures). "
+        f"Nothing was sent; you contact the provider."
+    )
 
 
 def _format_switching(payload: Dict[str, Any]) -> str:

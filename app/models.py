@@ -5,7 +5,7 @@ Tables:
   - users
   - subscriptions
   - usage_data
-  - negotiation_history
+  - negotiation_briefs  (what to ask a provider for, and the answer the user reports)
   - audit_logs
   - plan_catalog        (plans providers offer — the alternatives)
   - user_preferences    (constraints the twin must respect)
@@ -114,8 +114,8 @@ class Subscription(Base):
     # ── Relationships ────────────────────────────────────────
     user = relationship("User", back_populates="subscriptions")
     catalog_plan = relationship("PlanCatalog")
-    negotiations = relationship(
-        "NegotiationHistory", back_populates="subscription", cascade="all, delete-orphan"
+    briefs = relationship(
+        "NegotiationBrief", back_populates="subscription", cascade="all, delete-orphan"
     )
     usage_records = relationship("UsageData", back_populates="subscription")
     history = relationship(
@@ -165,27 +165,47 @@ class UsageData(Base):
 # ─────────────────────────────────────────────────────────────
 # 4. Negotiation History
 # ─────────────────────────────────────────────────────────────
-class NegotiationHistory(Base):
-    """One round of an offer–counteroffer negotiation cycle."""
+BRIEF_STATUSES = ("open", "accepted", "declined", "dismissed")
 
-    __tablename__ = "negotiation_history"
 
-    id               = Column(Integer, primary_key=True, index=True)
-    subscription_id  = Column(Integer, ForeignKey("subscriptions.id", ondelete="CASCADE"), nullable=False, index=True)
+class NegotiationBrief(Base):
+    """
+    What the user could ask a provider for, with a draft message.
 
-    round_number     = Column(Integer, nullable=False)
-    agent_offer      = Column(Float, nullable=False)
-    provider_counter = Column(Float, nullable=True)
-    status           = Column(String(20), nullable=False, default="pending")  # pending | accepted | rejected | final
+    The twin never contacts a provider: the user does, then reports the
+    answer (``accepted`` with the agreed price, ``declined``, or
+    ``dismissed`` if they did not pursue it).
+    """
 
-    notes            = Column(Text, nullable=True)
-    created_at       = Column(DateTime, default=_utcnow, nullable=False)
+    __tablename__ = "negotiation_briefs"
 
-    # ── Relationships ────────────────────────────────────────
-    subscription = relationship("Subscription", back_populates="negotiations")
+    id              = Column(Integer, primary_key=True)
+    user_id         = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    subscription_id = Column(Integer, ForeignKey("subscriptions.id", ondelete="CASCADE"), nullable=False, index=True)
+    run_id          = Column(Integer, ForeignKey("agent_runs.id", ondelete="SET NULL"), nullable=True, index=True)
+
+    status          = Column(String(20), nullable=False, default="open")
+    current_cost    = Column(Float, nullable=False)
+    effective_cost  = Column(Float, nullable=False)       # price + average overage
+    opening_ask     = Column(Float, nullable=False)       # what to ask for first
+    walk_away_price = Column(Float, nullable=False)       # accept at or below this
+    content         = Column(Text, nullable=False)        # JSON: evidence, leverage, fallback, caveats
+    draft_message   = Column(Text, nullable=False)
+    included_usage  = Column(Boolean, nullable=False, default=False)   # draft quotes usage figures
+
+    agreed_price    = Column(Float, nullable=True)        # reported by the user
+    outcome_note    = Column(Text, nullable=True)
+    reported_at     = Column(DateTime, nullable=True)
+    created_at      = Column(DateTime, default=_utcnow, nullable=False)
+
+    subscription = relationship("Subscription", back_populates="briefs")
+
+    __table_args__ = (
+        CheckConstraint(_in_check(BRIEF_STATUSES), name="valid_status"),
+    )
 
     def __repr__(self):
-        return f"<NegotiationHistory id={self.id} round={self.round_number} status={self.status!r}>"
+        return f"<NegotiationBrief id={self.id} sub={self.subscription_id} status={self.status!r}>"
 
 
 # ─────────────────────────────────────────────────────────────

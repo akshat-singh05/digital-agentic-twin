@@ -44,7 +44,8 @@ from app.schemas import (
     UsageImportRequest,
     PlanImportRequest,
     UsageDataOut,
-    NegotiationRoundOut,
+    NegotiationBriefOut,
+    BriefOutcomeRequest,
     AuditLogOut,
     PlanCatalogOut,
     PlanHistoryOut,
@@ -61,7 +62,7 @@ from app.services import (
 from app.modules.privacy_mediator.service import list_consents, set_consent
 from app.modules.usage_analyzer.service import analyze_user_usage
 from app.modules.privacy_mediator.service import get_sanitized_usage
-from app.modules.negotiation_agent.service import run_negotiation
+from app.modules.negotiation_agent import service as negotiation_service
 from app.modules.plan_switching.service import (
     approve_recommendation, get_alternatives, propose_plan_switch, reject_recommendation,
     rollback_last_change,
@@ -529,22 +530,6 @@ def list_usage(user_id: int, db: Session = Depends(get_db), current: User = _Aut
 
 
 # ═════════════════════════════════════════════════════════════
-#  NEGOTIATION HISTORY
-# ═════════════════════════════════════════════════════════════
-@router.get(
-    "/negotiation/{subscription_id}/history",
-    response_model=SuccessResponse[List[NegotiationRoundOut]],
-    tags=["Negotiation"],
-)
-def get_negotiation_history(subscription_id: int, db: Session = Depends(get_db),
-                            current: User = _Auth):
-    """Retrieve all negotiation rounds for a subscription, ordered by round."""
-    _subscription_scope(db, current, subscription_id)
-    rounds = subscription_service.get_negotiation_rounds(db, subscription_id)
-    return {"status": "success", "data": rounds}
-
-
-# ═════════════════════════════════════════════════════════════
 #  AUDIT LOGS
 # ═════════════════════════════════════════════════════════════
 @router.get(
@@ -618,27 +603,94 @@ def sanitize_usage(user_id: int, db: Session = Depends(get_db), current: User = 
 
 
 # ═════════════════════════════════════════════════════════════
-#  NEGOTIATION AGENT
+#  NEGOTIATION AGENT  (prepares what the user can ask a provider for)
 # ═════════════════════════════════════════════════════════════
+def _brief_scope(db: Session, current: User, brief_id: int, write: bool = False):
+    message = f"Negotiation brief with id {brief_id} not found"
+    try:
+        brief = negotiation_service.require_brief(db, brief_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail={"status": "error", "message": message})
+    authorize(current, brief.user_id, message, write=write)
+    return brief
+
+
 @router.post(
     "/negotiate/{user_id}",
-    response_model=SuccessResponse[dict],
+    response_model=SuccessResponse[NegotiationBriefOut],
+    status_code=201,
     tags=["Negotiation Agent"],
 )
-def negotiate_for_user(user_id: int, db: Session = Depends(get_db), current: User = _Auth):
+def prepare_negotiation_brief(user_id: int, db: Session = Depends(get_db), current: User = _Auth):
     """
-    Run a multi-round negotiation for the user's most underutilized plan.
+    Prepare a negotiation brief for the user's most underutilized plan.
 
-    The counterparty is the built-in provider **simulator** (the response
-    carries ``simulated: true``).  Rounds are persisted to
-    negotiation_history.  Requires the ``usage_analysis``,
-    ``negotiate_on_behalf`` and ``share_usage_with_provider`` consents.
+    The twin contacts **nobody**: the brief says what to ask for, the price
+    above which switching is the better deal, the facts that support the
+    request, and a draft message.  Usage figures appear in the draft only if
+    ``share_usage_with_provider`` is granted.  Requires ``usage_analysis`` and
+    ``negotiate_on_behalf``.  Report what the provider says with
+    ``POST /negotiation/briefs/{id}/outcome``.
     """
     _user_scope(current, user_id, write=True)
     try:
-        result = run_negotiation(db, user_id)
+        result = negotiation_service.prepare_brief(db, user_id)
     except ValueError as e:
         _raise_for(e)
+    return {"status": "success", "data": result}
+
+
+@router.get(
+    "/negotiation/briefs/user/{user_id}",
+    response_model=SuccessResponse[List[NegotiationBriefOut]],
+    tags=["Negotiation Agent"],
+)
+def list_negotiation_briefs(
+    user_id: int,
+    status: Optional[str] = Query(None, pattern="^(open|accepted|declined|dismissed)$"),
+    limit: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+    current: User = _Auth,
+):
+    """A user's negotiation briefs, newest first (``?status=open`` for those awaiting an answer)."""
+    _user_scope(current, user_id)
+    return {"status": "success", "data": negotiation_service.list_briefs(db, user_id, status, limit)}
+
+
+@router.get(
+    "/negotiation/briefs/{brief_id}",
+    response_model=SuccessResponse[NegotiationBriefOut],
+    tags=["Negotiation Agent"],
+)
+def get_negotiation_brief(brief_id: int, db: Session = Depends(get_db), current: User = _Auth):
+    """One brief with its evidence, draft message and (once reported) the outcome."""
+    brief = _brief_scope(db, current, brief_id)
+    return {"status": "success", "data": negotiation_service.brief_out(brief)}
+
+
+@router.post(
+    "/negotiation/briefs/{brief_id}/outcome",
+    response_model=SuccessResponse[NegotiationBriefOut],
+    tags=["Negotiation Agent"],
+)
+def report_negotiation_outcome(
+    brief_id: int, payload: BriefOutcomeRequest, db: Session = Depends(get_db), current: User = _Auth,
+):
+    """
+    Report what the provider answered: ``accepted`` (with the agreed monthly
+    price, lower than today's), ``declined``, or ``dismissed`` if you did not
+    pursue it.  This is your own statement and is not verified.  An accepted
+    price can then be proposed as a change (``POST /switch/{user_id}``).
+    """
+    _brief_scope(db, current, brief_id, write=True)
+    try:
+        result = negotiation_service.report_outcome(
+            db, brief_id, payload.outcome, payload.agreed_price, payload.note,
+        )
+    except ConflictError as e:
+        raise HTTPException(status_code=409, detail={"status": "error", "message": str(e)})
+    except ValueError as e:
+        _raise_validation(e)
     return {"status": "success", "data": result}
 
 

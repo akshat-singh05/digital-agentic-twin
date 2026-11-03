@@ -11,9 +11,9 @@ CONSENT_SCOPES: Dict[str, str] = {
     "usage_analysis":
         "Analyze my usage history to find savings opportunities.",
     "share_usage_with_provider":
-        "Share privacy-protected (noised) usage summaries with providers during negotiation.",
+        "Include my usage figures (rounded) in draft messages to providers.",
     "negotiate_on_behalf":
-        "Negotiate prices with providers on my behalf.",
+        "Prepare negotiation briefs and draft messages for me (I contact the provider myself).",
     "execute_plan_changes":
         "Apply plan or price changes I have approved to my subscriptions.",
 }

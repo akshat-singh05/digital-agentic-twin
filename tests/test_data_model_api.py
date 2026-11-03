@@ -1,10 +1,9 @@
 """Phase B data-model features through the API: catalog, usage linking,
 plan history, preferences, consents, and the demo seeder."""
 
-import app.modules.negotiation_agent.engine as engine
 from app.database import SessionLocal
 from app.models import Consent, PlanCatalog, Subscription, UsageData
-from tests.conftest import add_usage, approve, make_subscription, make_user
+from tests.conftest import add_usage, agree_price, approve, make_subscription, make_user
 
 
 def _add_plans(*plans):
@@ -92,14 +91,12 @@ def test_two_plans_with_one_provider_are_analyzed_separately(client):
 
 
 # ── Plan history ─────────────────────────────────────────────
-def test_applied_switch_is_recorded_in_plan_history(client, monkeypatch):
-    monkeypatch.setattr(engine, "_initial_offer", lambda cost, eff, rng: round(cost * 0.9, 2))
-    monkeypatch.setattr(engine, "_is_accepted", lambda offer, counter: True)
+def test_applied_switch_is_recorded_in_plan_history(client):
     uid = make_user(client)
     sub = make_subscription(client, uid)
     add_usage(client, uid, data_used_gb=20.0)
 
-    client.post(f"/api/negotiate/{uid}")
+    agree_price(client, uid)
     rec_id = client.post(f"/api/switch/{uid}").json()["data"]["recommendation_id"]
     assert client.get(f"/api/subscriptions/{sub}/history").json()["data"] == []  # proposal only
     approve(client, rec_id)

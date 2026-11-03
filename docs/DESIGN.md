@@ -14,8 +14,8 @@ are four scopes, and the default for each is **denied**:
 | Scope | Lets the twin... |
 |---|---|
 | `usage_analysis` | analyze your usage history |
-| `share_usage_with_provider` | share privacy-protected (noised) usage during negotiation |
-| `negotiate_on_behalf` | negotiate prices for you |
+| `share_usage_with_provider` | put your (rounded) usage figures in draft messages to providers |
+| `negotiate_on_behalf` | prepare negotiation briefs and drafts for you |
 | `execute_plan_changes` | apply a change you have approved |
 
 A denial is not an error to hide: it is written to the audit log as `access_denied`. Inside a
@@ -50,19 +50,26 @@ unless the terms change, so the system does not nag.
 
 *See `app/modules/usage_analyzer/analyzer.py` and `app/modules/plan_switching/alternatives.py`.*
 
-## 4. Negotiation with a walk-away price
+## 4. Coach, don't impersonate
 
-**Idea:** know your best alternative before you negotiate.
+**Idea:** no provider offers an API to negotiate with, so an "agent" that haggles for you can
+only be a simulation. The honest, useful version prepares *you*.
 
-The agent will not agree to pay more than **95% of today's price**, or more than the best
-catalog alternative costs, whichever is lower. That is its walk-away price (the user's
-BATNA, best alternative to a negotiated agreement). It negotiates up to five rounds and
-accepts when the gap to the provider's counter is within 3%.
+The Negotiation Coach produces a **brief**: what to ask for, the **walk-away price**, the facts
+that support the request, a fallback, and a draft message. The walk-away price is at least 5%
+below today's price and never above the best catalog alternative (the user's BATNA, best
+alternative to a negotiated agreement); with a competing plan to cite, that plan's price is
+the opening ask, otherwise it is a 10% discount. These are rules of thumb, and the brief says so.
 
-**The provider is a simulator.** It is seeded per subscription and negotiation session, so any
-outcome can be replayed, and every result is labelled `simulated: true`. There are no
-fabricated integrations: the interface is real, the counterparty is clearly a stand-in.
-*See `app/modules/negotiation_agent/engine.py`.*
+**The twin contacts nobody.** The user sends the message and reports the answer (accepted at a
+price, declined, or not pursued). That report is the user's own statement and is never treated
+as verified. Only an accepted price can become a proposal, and it still waits for approval like
+any other. The consent gate stays meaningful: usage figures appear in the draft, rounded, only
+if the user allowed sharing them.
+
+An earlier version negotiated against a built-in provider simulator. It was replaced because a
+simulated "deal" looks like a result even when it is labelled one.
+*See `app/modules/negotiation_agent/brief.py`.*
 
 ## 5. Privacy before sharing
 
@@ -110,5 +117,6 @@ command-line step with no API, so nobody can promote themselves.
 ## 10. Say what is real
 
 The README separates what is real (analysis, consent, audit, approvals, rollback), what is
-basic (differential privacy), what is demo data (the plan catalog) and what is simulated
-(the provider). A project that is honest about its limits is easier to trust and to extend.
+basic (differential privacy), what is demo data (the plan catalog until real prices are
+imported) and what the twin deliberately does not do (contact a provider). A project that is
+honest about its limits is easier to trust and to extend.

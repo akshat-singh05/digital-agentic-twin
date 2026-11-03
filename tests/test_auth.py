@@ -2,14 +2,13 @@
 
 import pytest
 
-import app.modules.negotiation_agent.engine as engine
 from app import config
 from app.core.passwords import hash_password, verify_password
 from app.core.security import create_access_token
 from app.database import SessionLocal
 from app.models import User
 from tests.conftest import (
-    TEST_PASSWORD, add_usage, as_user, make_subscription, make_user,
+    TEST_PASSWORD, add_usage, agree_price, as_user, make_subscription, make_user,
 )
 
 
@@ -113,17 +112,16 @@ def test_dashboard_files_are_always_revalidated(client):
 
 # ── Per-user access control ──────────────────────────────────
 @pytest.fixture
-def alice_and_bob(client, monkeypatch):
-    """Alice has a subscription, usage, a run and a pending recommendation."""
-    monkeypatch.setattr(engine, "_initial_offer", lambda cost, eff, rng: round(cost * 0.9, 2))
-    monkeypatch.setattr(engine, "_is_accepted", lambda offer, counter: True)
+def alice_and_bob(client):
+    """Alice has a subscription, usage, a negotiation brief, a run and a pending recommendation."""
     alice = make_user(client, email="alice@example.com")
     sub = make_subscription(client, alice)
     add_usage(client, alice, data_used_gb=20.0)
+    brief = agree_price(client, alice)
     run = client.post(f"/api/run-cycle/{alice}").json()["data"]
     bob = make_user(client, email="bob@example.com")
     return {"alice": alice, "bob": bob, "sub": sub, "run_id": run["run_id"],
-            "rec_id": run["recommendation"]["recommendation_id"]}
+            "brief_id": brief["id"], "rec_id": run["recommendation"]["recommendation_id"]}
 
 
 def test_other_users_data_looks_nonexistent(client, alice_and_bob):
@@ -133,7 +131,8 @@ def test_other_users_data_looks_nonexistent(client, alice_and_bob):
         f"/api/users/{a['alice']}", f"/api/users/{a['alice']}/consents",
         f"/api/subscriptions/user/{a['alice']}", f"/api/subscriptions/{a['sub']}",
         f"/api/subscriptions/{a['sub']}/history", f"/api/usage/user/{a['alice']}",
-        f"/api/negotiation/{a['sub']}/history", f"/api/audit/{a['alice']}",
+        f"/api/negotiation/briefs/{a['brief_id']}", f"/api/negotiation/briefs/user/{a['alice']}",
+        f"/api/audit/{a['alice']}",
         f"/api/recommendations/user/{a['alice']}", f"/api/recommendations/{a['rec_id']}",
         f"/api/runs/{a['run_id']}", f"/api/runs/user/{a['alice']}",
     ):
@@ -155,6 +154,9 @@ def test_users_cannot_act_for_each_other(client, alice_and_bob):
         "period_start": "2026-07-01T00:00:00", "period_end": "2026-07-28T00:00:00",
     }).status_code == 404
     assert client.post(f"/api/subscriptions/{a['sub']}/rollback").status_code == 404
+    assert client.post(f"/api/negotiate/{a['alice']}").status_code == 404
+    assert client.post(f"/api/negotiation/briefs/{a['brief_id']}/outcome",
+                       json={"outcome": "dismissed"}).status_code == 404
 
     as_user(client, a["alice"])           # Alice's proposal is untouched
     assert client.get(f"/api/recommendations/{a['rec_id']}").json()["data"]["status"] == "proposed"

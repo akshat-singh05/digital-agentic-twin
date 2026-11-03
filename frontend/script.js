@@ -168,7 +168,7 @@ const pageTitles = {
   subscriptions: 'Subscriptions',
   usage:         'Usage Data',
   analysis:      'Usage Analysis',
-  negotiation:   'Negotiation Agent',
+  negotiation:   'Negotiation Coach',
   switching:     'Plan Switching',
   audit:         'Audit Logs',
   approvals:     'Approvals',
@@ -415,9 +415,9 @@ async function runFullCycle() {
         </div>` : ''}
         ${d.negotiation ? `
         <div class="result-card">
-          <div class="result-title">🤝 Negotiation</div>
-          <div class="result-value">₹${d.negotiation.final_price}</div>
-          <div class="result-sub">${d.negotiation.savings_pct}% savings · ${d.negotiation.total_rounds} rounds · ${d.negotiation.status}</div>
+          <div class="result-title">🤝 Negotiation Brief</div>
+          <div class="result-value">Ask ₹${d.negotiation.opening_ask}</div>
+          <div class="result-sub">Switch rather than pay above ₹${d.negotiation.walk_away_price} · you contact the provider</div>
         </div>` : ''}
         ${d.switching ? `
         <div class="result-card">
@@ -978,94 +978,148 @@ async function runAnalysis() {
 // ═════════════════════════════════════════════════════════
 //  NEGOTIATION PAGE
 // ═════════════════════════════════════════════════════════
+const BRIEF_BADGE = {
+  open: ['Waiting for your answer', 'warning'], accepted: ['Accepted', 'success'],
+  declined: ['Declined', 'danger'], dismissed: ['Not pursued', 'info'],
+};
+
 async function renderNegotiation() {
   const body = $('contentBody');
-  body.innerHTML = `
-    <div class="page-section">
-      <div class="card">
-        <div class="card-header">
-          <h3>🤝 Autonomous Negotiation</h3>
-          <button class="btn btn-primary" onclick="runNegotiation()" id="btnNegotiate" ${!selectedUser ? 'disabled' : ''}>
-            🤝 Negotiate for User ${selectedUser || '—'}
-          </button>
+  if (!requireUser()) {
+    body.innerHTML = emptyState('🤝', 'Select a User', 'Choose a user to prepare a negotiation brief for.');
+    return;
+  }
+  try {
+    const briefs = (await apiGet(`/negotiation/briefs/user/${selectedUser}?limit=20`)).data || [];
+    body.innerHTML = `
+      <div class="page-section">
+        ${readOnlyNote()}
+        <div class="card">
+          <div class="card-header">
+            <h3>🤝 Negotiation Coach</h3>
+            ${canAct() ? `<button class="btn btn-primary" onclick="prepareBrief()" id="btnBrief">📝 Prepare a brief</button>` : ''}
+          </div>
+          <p style="color:var(--text-secondary);font-size:0.88rem">
+            The twin <strong>does not contact any provider</strong>. It works out what you could ask for, the price above
+            which switching is the better deal, and a draft message. You send it, then report the answer here —
+            a price you report can be proposed as a change for your approval.
+          </p>
         </div>
-        <p style="color:var(--text-secondary);font-size:0.88rem;margin-bottom:16px">
-          Simulates multi-round price negotiation between the user's digital twin and the service provider.
-        </p>
-        <div id="negotiationResult">
-          ${!selectedUser ? emptyState('🤝', 'Select a User', 'Choose a user to run negotiation for.') : emptyState('🤝', 'Ready to Negotiate', 'Click the button above to start negotiation.')}
+        <div id="briefList">
+          ${briefs.length === 0
+            ? emptyState('🤝', 'No briefs yet', 'Prepare one for your most underutilized plan.')
+            : briefs.map(briefCard).join('')}
         </div>
-      </div>
-    </div>
-  `;
+      </div>`;
+  } catch (e) {
+    body.innerHTML = emptyState('⚠️', 'Error', e.message);
+  }
 }
 
-async function runNegotiation() {
-  if (!requireUser()) return;
-  const btn = $('btnNegotiate');
-  btn.disabled = true;
-  btn.innerHTML = '<span class="spinner"></span> Negotiating...';
-  $('negotiationResult').innerHTML = loading('Running multi-round negotiation...');
-
-  try {
-    const res = await apiPost(`/negotiate/${selectedUser}`);
-    const d = res.data;
-    const rounds = d.rounds || [];
-
-    const outcomeBadge = d.status === 'accepted' ? badge('Accepted', 'success') :
-                         d.status === 'rejected' ? badge('Rejected', 'danger') : badge(d.status, 'warning');
-
-    $('negotiationResult').innerHTML = `
+function briefCard(b) {
+  const [label, tone] = BRIEF_BADGE[b.status] || [b.status, 'info'];
+  const list = items => (items || []).map(i => `<li>${esc(i)}</li>`).join('');
+  const done = b.status === 'open' ? '' : `
+    <div class="result-message"><span class="msg-icon">📌</span><div>
+      ${b.status === 'accepted' ? `You reported ${esc(b.provider)} agreed to <strong>${money(b.agreed_price)}/month</strong>.` :
+        b.status === 'declined' ? `You reported ${esc(b.provider)} declined.` : 'You did not pursue this brief.'}
+      ${b.outcome_note ? `<br>Note: ${esc(b.outcome_note)}` : ''}
+      ${b.status === 'accepted' ? '<br>Run the decision cycle (or Plan Switching) to turn it into a proposal for your approval.' : ''}
+    </div></div>`;
+  const form = (b.status === 'open' && canAct()) ? `
+    <div style="margin-top:14px">
+      <h4 style="margin-bottom:8px">What did the provider say?</h4>
+      <div class="form-grid">
+        <div class="form-group">
+          <label>Answer</label>
+          <select id="outcome-${b.id}" onchange="document.getElementById('price-wrap-${b.id}').hidden = this.value !== 'accepted'">
+            <option value="accepted">They accepted a lower price</option>
+            <option value="declined">They declined</option>
+            <option value="dismissed">I did not pursue it</option>
+          </select>
+        </div>
+        <div class="form-group" id="price-wrap-${b.id}">
+          <label>Agreed price (₹/month, below ${money(b.current_cost)})</label>
+          <input type="number" id="price-${b.id}" step="0.01" min="0.01" placeholder="e.g. ${(b.opening_ask).toFixed(2)}" />
+        </div>
+        <div class="form-group">
+          <label>Note (optional)</label>
+          <input type="text" id="note-${b.id}" maxlength="500" placeholder="Who you spoke to, how" />
+        </div>
+      </div>
+      <button class="btn btn-primary" onclick="submitOutcome(${b.id})">Save answer</button>
+    </div>` : '';
+  return `
+    <div class="card" style="margin-top:20px">
+      <div class="card-header">
+        <h3>📱 ${esc(b.provider)} — ${esc(b.plan_name)}</h3>
+        ${badge(label, tone)}
+      </div>
       <div class="result-grid">
-        <div class="result-card">
-          <div class="result-title">Original Cost</div>
-          <div class="result-value">₹${d.original_cost}</div>
-          <div class="result-sub">${esc(d.provider)} — ${esc(d.plan_name)}</div>
-        </div>
-        <div class="result-card">
-          <div class="result-title">Final Price</div>
-          <div class="result-value" style="color:var(--success)">₹${d.final_price}</div>
-          <div class="result-sub">${d.savings_pct}% savings achieved</div>
-        </div>
-        <div class="result-card">
-          <div class="result-title">Total Rounds</div>
-          <div class="result-value">${d.total_rounds}</div>
-          <div class="result-sub">Offer-counteroffer cycles</div>
-        </div>
-        <div class="result-card">
-          <div class="result-title">Outcome</div>
-          <div class="result-value">${outcomeBadge}</div>
-          <div class="result-sub">Efficiency used: ${pct(d.efficiency_used)} · walk-away ₹${d.reservation_price}${d.best_alternative ? ` (${esc(d.best_alternative.plan_name)})` : ''}</div>
-        </div>
+        <div class="result-card"><div class="result-title">You pay now</div>
+          <div class="result-value">${money(b.current_cost)}</div>
+          <div class="result-sub">${b.effective_cost !== b.current_cost ? `${money(b.effective_cost)} with overage` : 'per month'}</div></div>
+        <div class="result-card"><div class="result-title">Ask for</div>
+          <div class="result-value" style="color:var(--success)">${money(b.opening_ask)}</div>
+          <div class="result-sub">your opening request</div></div>
+        <div class="result-card"><div class="result-title">Walk-away price</div>
+          <div class="result-value">${money(b.walk_away_price)}</div>
+          <div class="result-sub">above this, switching is better</div></div>
       </div>
+      <h4 style="margin:14px 0 6px">Why they might agree</h4>
+      <ul style="margin-left:18px;color:var(--text-secondary);font-size:0.88rem">${list(b.leverage)}</ul>
+      <p style="margin-top:8px;font-size:0.88rem"><strong>If they decline:</strong> ${esc(b.fallback)}</p>
+      <h4 style="margin:14px 0 6px">Draft message ${b.included_usage ? '' : badge('no usage figures — sharing not allowed', 'info')}</h4>
+      <textarea id="draft-${b.id}" class="draft-box" readonly rows="9">${esc(b.draft_message)}</textarea>
+      <div class="form-actions" style="margin-top:8px">
+        <button class="btn btn-secondary btn-sm" onclick="copyDraft(${b.id})">📋 Copy message</button>
+      </div>
+      <ul style="margin:10px 0 0 18px;color:var(--text-muted);font-size:0.8rem">${list(b.caveats)}</ul>
+      ${done}${form}
+    </div>`;
+}
 
-      <!-- Round-by-round -->
-      <div class="card" style="margin-top:20px">
-        <div class="card-header"><h3>📜 Round-by-Round Breakdown</h3></div>
-        <div class="rounds-timeline">
-          ${rounds.map(r => `
-            <div class="round-item">
-              <div class="round-num">${r.round_number}</div>
-              <div class="round-details">
-                <div class="round-label">Round ${r.round_number}</div>
-                <div class="round-values">
-                  <span>Agent: <strong style="color:var(--accent-secondary)">₹${r.agent_offer}</strong></span>
-                  <span>Provider: <strong style="color:var(--warning)">₹${r.provider_counter || '—'}</strong></span>
-                </div>
-              </div>
-              <span class="round-status ${r.status}">${r.status}</span>
-            </div>
-          `).join('')}
-        </div>
-      </div>
-    `;
-    toast('success', 'Negotiation Complete', `${d.savings_pct}% savings — ${d.status}`);
+async function prepareBrief() {
+  if (!requireUser()) return;
+  const btn = $('btnBrief');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> Preparing...';
+  try {
+    await apiPost(`/negotiate/${selectedUser}`);
+    toast('success', 'Brief prepared', 'Nothing was sent to anyone.');
+    renderNegotiation();
   } catch (e) {
-    $('negotiationResult').innerHTML = `<div class="result-message" style="border-color:var(--danger);background:var(--danger-bg)"><span class="msg-icon">❌</span>${esc(e.message)}</div>`;
-    toast('error', 'Negotiation Failed', e.message);
-  } finally {
+    toast('error', 'No brief prepared', e.message);
     btn.disabled = false;
-    btn.innerHTML = `🤝 Negotiate for User ${selectedUser}`;
+    btn.innerHTML = '📝 Prepare a brief';
+  }
+}
+
+async function copyDraft(id) {
+  const box = $(`draft-${id}`);
+  try {
+    await navigator.clipboard.writeText(box.value);
+    toast('success', 'Copied', 'Review it before you send it.');
+  } catch {
+    box.select();
+    toast('info', 'Select and copy', 'Your browser blocked automatic copying.');
+  }
+}
+
+async function submitOutcome(id) {
+  const outcome = $(`outcome-${id}`).value;
+  const body = { outcome, note: $(`note-${id}`).value.trim() || null };
+  if (outcome === 'accepted') {
+    const price = parseFloat($(`price-${id}`).value);
+    if (!(price > 0)) { toast('error', 'Price needed', 'Enter the monthly price the provider agreed to.'); return; }
+    body.agreed_price = price;
+  }
+  try {
+    await apiPost(`/negotiation/briefs/${id}/outcome`, body);
+    toast('success', 'Answer saved');
+    renderNegotiation();
+  } catch (e) {
+    toast('error', 'Could not save', e.message);
   }
 }
 
@@ -1088,7 +1142,7 @@ async function renderSwitching() {
           Nothing is applied until you approve it.
         </p>
         <div id="switchResult">
-          ${!selectedUser ? emptyState('🔄', 'Select a User', 'Choose a user to attempt plan switch.') : emptyState('🔄', 'Ready', 'Run a negotiation first, then click switch.')}
+          ${!selectedUser ? emptyState('🔄', 'Select a User', 'Choose a user to attempt plan switch.') : emptyState('🔄', 'Ready', 'Report what the provider said on the Negotiation page first, then click switch.')}
         </div>
       </div>
     </div>

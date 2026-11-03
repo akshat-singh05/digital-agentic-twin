@@ -12,7 +12,7 @@ from typing import List, Optional
 from sqlalchemy.orm import Session
 
 from app.models import (
-    AuditLog, NegotiationHistory, PlanCatalog, PlanHistory, Subscription, UsageData,
+    AuditLog, PlanCatalog, PlanHistory, Subscription, UsageData,
 )
 from app.services.base_service import get_or_raise, get_or_none, save, transactional
 
@@ -135,19 +135,6 @@ def create_usage_record(db: Session, usage_data: dict) -> UsageData:
     with transactional(db):
         save(db, record)
     return record
-
-
-# ─────────────────────────────────────────────────────────────
-# Negotiation History
-# ─────────────────────────────────────────────────────────────
-def get_negotiation_rounds(db: Session, subscription_id: int) -> List[NegotiationHistory]:
-    """Return all negotiation rounds for a subscription, ordered by round number."""
-    return (
-        db.query(NegotiationHistory)
-        .filter(NegotiationHistory.subscription_id == subscription_id)
-        .order_by(NegotiationHistory.round_number)
-        .all()
-    )
 
 
 # ─────────────────────────────────────────────────────────────

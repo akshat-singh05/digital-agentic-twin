@@ -37,7 +37,7 @@ from sqlalchemy.orm import Session
 from app import config
 from app.core.errors import ConflictError
 from app.core.run_context import current_run_id
-from app.models import NegotiationHistory, PlanCatalog, PlanHistory, Recommendation, Subscription
+from app.models import NegotiationBrief, PlanCatalog, PlanHistory, Recommendation, Subscription
 from app.services.base_service import save, transactional
 from app.services.catalog_service import list_plans
 from app.services.recommendation_service import pending_recommendation, require_recommendation
@@ -117,16 +117,18 @@ def _get_recent_usage_stats(db: Session, subscription: Subscription) -> Dict[str
     }
 
 
-def _fresh_negotiation(db: Session, sub: Subscription) -> Optional[NegotiationHistory]:
+def reported_deal(db: Session, sub: Subscription) -> Optional[NegotiationBrief]:
     """
-    The last round of the latest negotiation for the subscription's
-    *current* terms — a negotiation older than the last plan change was
-    about a different price and is ignored.
+    The latest negotiation brief for the subscription's *current* terms whose
+    outcome the user has reported — a report older than the last plan change
+    was about a different price and is ignored.  Open briefs (no answer yet)
+    and dismissed ones are not a deal.
     """
-    neg = (
-        db.query(NegotiationHistory)
-        .filter(NegotiationHistory.subscription_id == sub.id)
-        .order_by(NegotiationHistory.id.desc())   # rounds share timestamps; id is ordered
+    brief = (
+        db.query(NegotiationBrief)
+        .filter(NegotiationBrief.subscription_id == sub.id,
+                NegotiationBrief.status.in_(("accepted", "declined")))
+        .order_by(NegotiationBrief.id.desc())
         .first()
     )
     last_change = (
@@ -135,9 +137,9 @@ def _fresh_negotiation(db: Session, sub: Subscription) -> Optional[NegotiationHi
         .order_by(PlanHistory.id.desc())
         .first()
     )
-    if neg and last_change and neg.created_at <= last_change.created_at:
+    if brief and last_change and brief.reported_at <= last_change.created_at:
         return None
-    return neg
+    return brief
 
 
 def _risk_drawback(risk_flag: str) -> List[str]:
@@ -269,39 +271,36 @@ def propose_plan_switch(
     current_cost = subscription.monthly_cost
     options, notes = [], []
 
-    # 3A — Negotiated price on the current plan
-    negotiation = _fresh_negotiation(db, subscription)
+    # 3A — A price the provider agreed to, as reported by the user
+    negotiation = reported_deal(db, subscription)
     if negotiation is None:
-        notes.append("No negotiated price for the current terms.")
+        notes.append("No provider offer reported for the current terms.")
     elif negotiation.status != "accepted":
-        notes.append(
-            f"Switch rejected: negotiation ended without agreement "
-            f"(provider's final counter ₹{negotiation.provider_counter})."
-        )
+        notes.append(f"The provider declined your request (brief #{negotiation.id}).")
     else:
-        proposed = {**current, "monthly_cost": negotiation.agent_offer}
+        proposed = {**current, "monthly_cost": negotiation.agreed_price}
         ev = evaluate_switch(current, proposed, usage_stats)
         if not ev["approved"]:
             notes.append(ev["reason"])
         else:
-            savings = round(current_cost - negotiation.agent_offer, 2)
+            savings = round(current_cost - negotiation.agreed_price, 2)
             options.append({
                 "action": "apply_negotiated_price",
-                "proposed_cost": negotiation.agent_offer,
+                "proposed_cost": negotiation.agreed_price,
                 "monthly_savings": savings,
                 "evaluation": ev,
                 "plan": None,
                 "what": (
                     f"Keep {subscription.provider} {subscription.plan_name} at the negotiated "
-                    f"price ₹{negotiation.agent_offer} instead of ₹{current_cost}."
+                    f"price ₹{negotiation.agreed_price} instead of ₹{current_cost}."
                 ),
                 "benefits": [
                     f"Saves ₹{savings}/month ({round(savings / current_cost * 100, 2)}%).",
                     "Same plan, limits and features.",
                 ],
                 "drawbacks": [
-                    "The price comes from the built-in provider simulator — a real "
-                    "provider would have to confirm it."
+                    "This is the price you reported the provider agreed to; the twin has not "
+                    "verified it, so check your next bill."
                 ] + _risk_drawback(ev["risk_flag"]),
             })
 
@@ -389,8 +388,8 @@ def propose_plan_switch(
                     "risk_flag": ev["risk_flag"],
                     "minimum_savings_pct": MINIMUM_SAVINGS_PCT,
                     "usage_stats": usage_stats,
-                    "negotiation_round_id": negotiation.id if negotiation else None,
-                    "simulated_negotiation": chosen["action"] == "apply_negotiated_price",
+                    "negotiation_brief_id": negotiation.id if negotiation else None,
+                    "user_reported_price": chosen["action"] == "apply_negotiated_price",
                 }),
                 requires_approval=True,
                 status="proposed",

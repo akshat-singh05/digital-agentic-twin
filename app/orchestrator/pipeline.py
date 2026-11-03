@@ -3,10 +3,12 @@ Orchestrator — the Digital Twin's decision cycle for one user.
 
     1. Usage Analyzer    → usage metrics per subscription + optimization target
     2. Privacy Mediator  → differentially-private usage for sharing
-    3. Negotiation Agent → simulated negotiation on an underutilized target,
-                           with the best catalog alternative as walk-away price
-    4. Plan Switching    → compares the deal with catalog alternatives;
-                           proposes the better one as a Recommendation
+    3. Negotiation Agent → a brief for the user to take to the provider (what
+                           to ask for, walk-away price, draft message); the
+                           twin contacts nobody
+    4. Plan Switching    → compares a provider offer the user has reported (if
+                           any) with catalog alternatives; proposes the better
+                           one as a Recommendation
     ── the run stops here ("awaiting_approval") until the user decides ──
 
 Rules the orchestrator enforces:
@@ -15,8 +17,9 @@ Rules the orchestrator enforces:
     an error.
   - Negotiation and switching act only on the analyzer's target, and not
     at all while a proposal for that subscription awaits a decision.
-    Negotiation runs only for an underutilized target; switching still
-    checks catalog alternatives if negotiation was skipped or failed.
+    A brief is prepared only for an underutilized target, and not while
+    an earlier one awaits the user's outcome; switching still checks
+    catalog alternatives whenever the brief is skipped or fails.
   - Each step's timing, outcome and error are stored in agent_run_steps;
     audit entries and recommendations carry the run id.
   - A failing step is rolled back and recorded; later steps that need its
@@ -38,7 +41,7 @@ from app.services.recommendation_service import pending_recommendation
 from app.services.user_service import require_user
 from app.modules.usage_analyzer.service import analyze_user_usage
 from app.modules.privacy_mediator.service import get_sanitized_usage
-from app.modules.negotiation_agent.service import run_negotiation
+from app.modules.negotiation_agent.service import brief_block_reason, prepare_brief
 from app.modules.plan_switching.service import propose_plan_switch
 
 logger = get_logger(__name__)
@@ -64,7 +67,8 @@ def _summarize(agent: str, result: Dict[str, Any]) -> Dict[str, Any]:
     if agent == "privacy_mediator":
         return {"sanitized_records": len(result.get("sanitized_usage", []))}
     if agent == "negotiation_agent":
-        return {k: result.get(k) for k in ("status", "final_price", "reservation_price", "total_rounds", "simulated")}
+        return {"brief_id": result.get("id"), "opening_ask": result.get("opening_ask"),
+                "walk_away_price": result.get("walk_away_price")}
     if agent == "plan_switching":
         return {k: result.get(k) for k in ("proposed", "recommendation_id", "action", "risk_flag")}
     return {}
@@ -190,11 +194,12 @@ def run_cycle(db: Session, user_id: int, trigger: str = "api") -> Dict[str, Any]
         else:
             target_id = target["subscription_id"]
 
-            # 3 — Negotiate a discount only on an underutilized plan
+            # 3 — Prepare a negotiation brief only for an underutilized plan
+            blocked = brief_block_reason(db, target_id)
             if target["recommendation"] != "downgrade":
                 why = "plan is overutilized — a discount on a plan that is too small won't help"
-            elif sanitized is None:
-                why = "privacy-protected usage data is not available"
+            elif blocked is not None:
+                why = blocked
             else:
                 why = None
             if why:
@@ -203,7 +208,7 @@ def run_cycle(db: Session, user_id: int, trigger: str = "api") -> Dict[str, Any]
             else:
                 record("negotiation", _step(
                     db, run, "negotiation_agent",
-                    lambda: run_negotiation(db, user_id, subscription_id=target_id)), "Negotiation")
+                    lambda: prepare_brief(db, user_id, subscription_id=target_id)), "Negotiation Brief")
 
             # 4 — Compare the deal (if any) with catalog alternatives; propose only
             record("switching", _step(
